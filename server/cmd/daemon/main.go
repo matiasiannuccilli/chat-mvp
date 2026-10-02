@@ -16,16 +16,16 @@ import (
 )
 
 type TextMsg struct {
-	ChannelID string `msgpack:"c"`
-	Sender    string `msgpack:"u"`
-	Content   string `msgpack:"m"`
-	Timestamp int64  `msgpack:"t"`
+	ChannelID string `json:"c"`
+	Sender    string `json:"u"`
+	Content   string `json:"m"`
+	Timestamp int64  `json:"t"`
 }
 
 type SignalPacket struct {
-	Target  string `msgpack:"target"`
-	Sender  string `msgpack:"sender,omitempty"`
-	Payload string `msgpack:"payload"`
+	Target  string `json:"target"`
+	Sender  string `json:"sender,omitempty"`
+	Payload string `json:"payload"`
 }
 
 type Client struct {
@@ -137,7 +137,7 @@ func (c *Client) readPump() {
 		switch opcode {
 		case 0x02:
 			var msg TextMsg
-			if err := msgpack.Unmarshal(payload, &msg); err == nil {
+			if err := json.Unmarshal(payload, &msg); err == nil {
 				c.hub.broadcast <- data
 				c.hub.dbQueue <- msg
 			}
@@ -146,21 +146,21 @@ func (c *Client) readPump() {
 				ChannelID string `msgpack:"c"`
 				Limit     int    `msgpack:"l"`
 			}
-			if err := msgpack.Unmarshal(payload, &req); err == nil {
+			if err := json.Unmarshal(payload, &req); err == nil {
 				if req.Limit <= 0 || req.Limit > 100 {
 					req.Limit = 50
 				}
 				history, _ := c.hub.getRecentMessages(req.ChannelID, req.Limit)
-				resp, _ := msgpack.Marshal(map[string]any{"c": req.ChannelID, "msgs": history})
+				resp, _ := json.Marshal(map[string]any{"c": req.ChannelID, "msgs": history})
 				c.send <- append([]byte{0x05}, resp...)
 			}
 		case 0x09:
 			c.hub.broadcast <- data
 		case 0x06, 0x07, 0x08:
 			var sig SignalPacket
-			if err := msgpack.Unmarshal(payload, &sig); err == nil {
+			if err := json.Unmarshal(payload, &sig); err == nil {
 				sig.Sender = c.id
-				packed, _ := msgpack.Marshal(sig)
+				packed, _ := json.Marshal(sig)
 				c.hub.mu.RLock()
 				if target, ok := c.hub.clients[sig.Target]; ok {
 					target.send <- append([]byte{opcode}, packed...)
