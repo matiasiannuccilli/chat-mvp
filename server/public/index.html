@@ -4,8 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QuantumVoice // TeamSpeak x Discord</title>
-    <!-- MessagePack v2 CDN estable -->
-    <script src="https://unpkg.com/@msgpack/msgpack@2.8.0/dist/msgpack.min.js"></script>
     <style>
         :root {
             --bg-base: #0b0b0e;
@@ -50,7 +48,7 @@
 
         /* Voice Users Tree */
         .voice-users-list { display: flex; flex-direction: column; gap: 2px; padding-left: 20px; margin-bottom: 8px; }
-        .voice-user-node { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 13px; color: var(--text-main); border-radius: var(--radius-sm); background: rgba(255,255,255,0.02); animation: fadeIn 0.2s ease; }
+        .voice-user-node { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 13px; color: var(--text-main); border-radius: var(--radius-sm); background: rgba(255,255,255,0.02); }
         .mini-avatar { width: 22px; height: 22px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: white; }
 
         /* User Footer */
@@ -67,8 +65,7 @@
         .chat-area { display: flex; flex-direction: column; height: 100%; background: var(--bg-base); }
         .chat-header { height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 24px; font-weight: 600; font-size: 15px; background: rgba(11, 11, 14, 0.5); backdrop-filter: blur(10px); }
         .messages-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-        .message-row { display: flex; flex-direction: column; gap: 4px; animation: fadeIn 0.2s ease; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        .message-row { display: flex; flex-direction: column; gap: 4px; }
         .message-meta { display: flex; align-items: center; gap: 8px; }
         .message-user { font-weight: 600; font-size: 13px; color: var(--text-main); }
         .message-time { font-size: 11px; color: var(--text-muted); }
@@ -78,8 +75,7 @@
         .chat-input-wrapper { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; align-items: center; gap: 12px; transition: border-color 0.2s; }
         .chat-input-wrapper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
         .chat-input-wrapper input { flex: 1; background: none; border: none; color: white; font-size: 14px; outline: none; padding: 6px; }
-        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.1s; }
-        .send-btn:hover { transform: scale(1.05); }
+        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 
         /* Members Panel */
         .members-panel { background: var(--bg-surface); border-left: 1px solid var(--border); padding: 20px 16px; display: flex; flex-direction: column; gap: 8px; }
@@ -93,7 +89,6 @@
 </head>
 <body>
 
-    <!-- Login Overlay -->
     <div id="login-overlay">
         <div class="login-card">
             <h1>QuantumVoice</h1>
@@ -103,23 +98,17 @@
         </div>
     </div>
 
-    <!-- App Container -->
     <div class="app-container" id="app-main" style="display: none;">
-        <!-- Sidebar -->
         <div class="sidebar">
             <div class="server-title">⚡️ QuantumVoice</div>
-            
             <div class="section-header">Canales de Texto</div>
             <div class="channel-item active"># general</div>
-            
             <div class="section-header">Canales de Voz</div>
             <div class="channel-item" onclick="toggleVoiceConnection()" id="voice-channel-btn">
                 🔊 Sala de Voz #1
             </div>
-            <!-- Árbol visual de usuarios en voz -->
             <div class="voice-users-list" id="voice-users-container"></div>
 
-            <!-- User Footer -->
             <div class="user-footer">
                 <div class="user-info">
                     <div class="user-avatar" id="footer-avatar">U</div>
@@ -131,7 +120,6 @@
             </div>
         </div>
 
-        <!-- Chat Core -->
         <div class="chat-area">
             <div class="chat-header"># general</div>
             <div class="messages-container" id="chat-messages"></div>
@@ -144,7 +132,6 @@
             </div>
         </div>
 
-        <!-- Members Panel -->
         <div class="members-panel">
             <div class="section-header">Miembros Online</div>
             <div class="member-row online">
@@ -163,6 +150,12 @@
         let isMuted = false;
         let inVoice = false;
         let voiceUsers = new Set();
+        const encoder = new TextEncoder();
+        const decoder = new TextDecoder();
+
+        // Helpers de serialización robustos sin librerías externas
+        const pack = (obj) => encoder.encode(JSON.stringify(obj));
+        const unpack = (buf) => JSON.parse(decoder.decode(buf));
 
         function startApp() {
             username = document.getElementById('username-input').value.trim();
@@ -176,233 +169,3 @@
             
             document.getElementById('login-overlay').style.display = 'none';
             document.getElementById('app-main').style.display = 'grid';
-
-            connectWebSocket();
-        }
-
-        function connectWebSocket() {
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${location.host}/ws?user=${userId}`);
-            ws.binaryType = "arraybuffer";
-
-            ws.onopen = () => {
-                appendSystemMessage("Conectado al servidor con éxito.");
-                requestSync();
-            };
-
-            ws.onmessage = async (event) => {
-                const buffer = new Uint8Array(event.data);
-                const opcode = buffer[0];
-                const payload = buffer.slice(1);
-
-                if (opcode === 0x02) { // Texto
-                    const msg = msgpack.decode(payload);
-                    appendMessage(msg.u.split('_')[0], msg.m, formatTime(msg.t));
-                } else if (opcode === 0x05) { // Historial
-                    const data = msgpack.decode(payload);
-                    if (data.msgs) {
-                        data.msgs.forEach(m => appendMessage(m.sender.split('_')[0], m.content, formatTime(m.created_at * 1000)));
-                    }
-                } else if (opcode === 0x09) { // Presencia de Voz
-                    const data = msgpack.decode(payload);
-                    handleVoicePresence(data.user, data.action);
-                } else if (opcode >= 0x06 && opcode <= 0x08) { // WebRTC Signaling
-                    const sig = msgpack.decode(payload);
-                    await handleSignaling(opcode, sig.sender, sig.payload);
-                }
-            };
-        }
-
-        function appendMessage(sender, text, time) {
-            const container = document.getElementById('chat-messages');
-            container.innerHTML += `
-                <div class="message-row">
-                    <div class="message-meta">
-                        <span class="message-user">${escapeHtml(sender)}</span>
-                        <span class="message-time">${time}</span>
-                    </div>
-                    <div class="message-text">${escapeHtml(text)}</div>
-                </div>
-            `;
-            container.scrollTop = container.scrollHeight;
-        }
-
-        function appendSystemMessage(text) {
-            const container = document.getElementById('chat-messages');
-            container.innerHTML += `<div style="color: var(--text-muted); font-size: 12px; text-align: center; margin: 8px 0;">${escapeHtml(text)}</div>`;
-            container.scrollTop = container.scrollHeight;
-        }
-
-        function sendMessage() {
-            const input = document.getElementById('message-input');
-            const content = input.value.trim();
-            if (!content || !ws) return;
-
-            const msg = { c: "general", u: userId, m: content, t: Date.now() };
-            const packed = msgpack.encode(msg);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x02;
-            packet.set(packed, 1);
-
-            ws.send(packet);
-            input.value = "";
-        }
-
-        function requestSync() {
-            const req = { c: "general", l: 50 };
-            const packed = msgpack.encode(req);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x04;
-            packet.set(packed, 1);
-            ws.send(packet);
-        }
-
-        // --- SISTEMA DE VOZ MESH ---
-        async function toggleVoiceConnection() {
-            const btn = document.getElementById('voice-channel-btn');
-            if (!inVoice) {
-                try {
-                    localStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true } });
-                    inVoice = true;
-                    btn.classList.add('active');
-                    btn.style.color = "var(--success)";
-                    
-                    broadcastVoicePresence("join");
-                    renderVoiceUsers();
-
-                    // Conectarnos a cualquier peer que ya esté en la sala de voz
-                    voiceUsers.forEach(peerId => {
-                        if (peerId !== userId) connectToPeer(peerId);
-                    });
-                } catch (e) {
-                    alert("No se pudo acceder al micrófono: " + e.message);
-                }
-            } else {
-                localStream?.getTracks().forEach(t => t.stop());
-                Object.values(peers).forEach(pc => pc.close());
-                peers = {};
-                inVoice = false;
-                btn.classList.remove('active');
-                btn.style.color = "";
-                
-                broadcastVoicePresence("leave");
-                renderVoiceUsers();
-            }
-        }
-
-        function broadcastVoicePresence(action) {
-            if (!ws) return;
-            const presence = { user: userId, action: action };
-            const packed = msgpack.encode(presence);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x09;
-            packet.set(packed, 1);
-            ws.send(packet);
-        }
-
-        function handleVoicePresence(peerId, action) {
-            if (action === "join") {
-                voiceUsers.add(peerId);
-                renderVoiceUsers();
-                if (inVoice && peerId !== userId && !peers[peerId]) {
-                    connectToPeer(peerId);
-                }
-            } else if (action === "leave") {
-                voiceUsers.delete(peerId);
-                renderVoiceUsers();
-                if (peers[peerId]) {
-                    peers[peerId].close();
-                    delete peers[peerId];
-                }
-            }
-        }
-
-        function renderVoiceUsers() {
-            const container = document.getElementById('voice-users-container');
-            container.innerHTML = "";
-            let activeList = Array.from(voiceUsers);
-            if (inVoice && !activeList.includes(userId)) {
-                activeList.push(userId);
-            }
-
-            activeList.forEach(id => {
-                const name = id.split('_')[0];
-                container.innerHTML += `
-                    <div class="voice-user-node">
-                        <div class="mini-avatar">${name.charAt(0).toUpperCase()}</div>
-                        <span>${escapeHtml(name)}</span>
-                    </div>
-                `;
-            });
-        }
-
-        async function connectToPeer(targetId) {
-            const pc = getOrCreatePeer(targetId);
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            sendSignal(0x06, targetId, JSON.stringify(offer));
-        }
-
-        function toggleMute() {
-            if (!localStream) return;
-            isMuted = !isMuted;
-            localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
-            const btn = document.getElementById('mute-btn');
-            btn.classList.toggle('active', isMuted);
-            btn.innerText = isMuted ? "🔇" : "🎤";
-        }
-
-        function formatTime(ms) {
-            const d = new Date(ms);
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        }
-
-        function escapeHtml(str) {
-            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
-
-        // WebRTC Signaling Engine
-        function getOrCreatePeer(targetId) {
-            if (peers[targetId]) return peers[targetId];
-            const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-            if (localStream) {
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-            }
-            pc.onicecandidate = e => { 
-                if (e.candidate) sendSignal(0x08, targetId, JSON.stringify(e.candidate)); 
-            };
-            pc.ontrack = e => { 
-                const audio = new Audio(); 
-                audio.srcObject = e.streams[0]; 
-                audio.play().catch(err => console.log("Audio autoplay error:", err)); 
-            };
-            peers[targetId] = pc;
-            return pc;
-        }
-
-        async function sendSignal(opcode, targetId, payloadStr) {
-            const sig = { target: targetId, payload: payloadStr };
-            const packed = msgpack.encode(sig);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = opcode;
-            packet.set(packed, 1);
-            ws.send(packet);
-        }
-
-        async function handleSignaling(opcode, senderId, payloadStr) {
-            const pc = getOrCreatePeer(senderId);
-            const data = JSON.parse(payloadStr);
-            if (opcode === 0x06) {
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp || data }));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                sendSignal(0x07, senderId, JSON.stringify(answer));
-            } else if (opcode === 0x07) {
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp || data }));
-            } else if (opcode === 0x08) {
-                await pc.addIceCandidate(new RTCIceCandidate(data));
-            }
-        }
-    </script>
-</body>
-</html>
