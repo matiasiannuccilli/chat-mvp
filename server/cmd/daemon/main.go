@@ -4,12 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sync"
-	"time"
 
 	"github.com/coder/websocket"
 	_ "github.com/mattn/go-sqlite3"
