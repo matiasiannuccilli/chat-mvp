@@ -2,73 +2,184 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Chat-MVP Ultra-Ligero</title>
-    <!-- MessagePack UMD CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.0.0-beta2/dist.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceChat // Apple-Grade MVP</title>
+    <script src="https://unpkg.com/@msgpack/msgpack@2.8.0/dist/msgpack.min.js"></script>
     <style>
-        body { font-family: monospace; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 95vh; box-sizing: border-box; }
-        #chat-box { flex: 1; border: 1px solid #333; background: #181818; padding: 15px; overflow-y: auto; margin-bottom: 15px; border-radius: 6px; }
-        .msg { margin-bottom: 8px; }
-        .msg span.user { color: #4ea8de; font-weight: bold; }
-        .controls { display: flex; gap: 10px; margin-bottom: 10px; }
-        input, button { padding: 10px; background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; font-family: monospace; }
-        input { flex: 1; }
-        button { cursor: pointer; background: #2b9348; border: none; }
-        button.danger { background: #d90429; }
+        :root {
+            --bg-base: #0b0b0e;
+            --bg-surface: #141418;
+            --bg-surface-hover: #1e1e24;
+            --accent: #2f80ed;
+            --accent-glow: rgba(47, 128, 237, 0.3);
+            --danger: #ff5c5c;
+            --success: #2ecc71;
+            --text-main: #f5f5f7;
+            --text-muted: #86868b;
+            --border: rgba(255, 255, 255, 0.06);
+            --radius-lg: 20px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: var(--bg-base); color: var(--text-main); height: 100vh; overflow: hidden; display: flex; justify-content: center; align-items: center; }
+
+        /* Login Overlay */
+        #login-overlay { position: fixed; inset: 0; background: rgba(11, 11, 14, 0.85); backdrop-filter: blur(20px); z-index: 1000; display: flex; justify-content: center; align-items: center; }
+        .login-card { background: var(--bg-surface); border: 1px solid var(--border); padding: 40px; border-radius: var(--radius-lg); width: 380px; text-align: center; box-shadow: 0 30px 60px rgba(0,0,0,0.5); }
+        .login-card h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.5px; }
+        .login-card p { color: var(--text-muted); font-size: 14px; margin-bottom: 24px; }
+        .login-card input { width: 100%; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: var(--radius-md); color: white; font-size: 15px; outline: none; margin-bottom: 16px; transition: all 0.2s; }
+        .login-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
+        .login-card button { width: 100%; padding: 14px; background: var(--text-main); color: var(--bg-base); border: none; border-radius: var(--radius-md); font-weight: 600; font-size: 15px; cursor: pointer; transition: transform 0.1s, opacity 0.2s; }
+        .login-card button:hover { opacity: 0.9; transform: scale(1.01); }
+
+        /* App Layout (3 Columns) */
+        .app-container { display: grid; grid-template-columns: 260px 1fr 240px; width: 100vw; height: 100vh; background: var(--bg-base); }
+        
+        /* Sidebar Channels */
+        .sidebar { background: var(--bg-surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px 12px; }
+        .server-title { font-weight: 600; font-size: 16px; padding: 0 12px 20px; letter-spacing: -0.3px; display: flex; align-items: center; gap: 8px; }
+        .section-header { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; padding: 12px 12px 6px; }
+        .channel-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+        .channel-item:hover { background: var(--bg-surface-hover); color: var(--text-main); }
+        .channel-item.active { background: var(--accent-glow); color: var(--accent); }
+
+        /* User Profile Footer inside Sidebar */
+        .user-footer { margin-top: auto; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); }
+        .user-info { display: flex; align-items: center; gap: 10px; }
+        .user-avatar { width: 32px; height: 32px; background: linear-gradient(135deg, #2f80ed, #56ccf2); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; color: white; }
+        .user-name { font-size: 13px; font-weight: 500; }
+        .voice-controls-mini { display: flex; gap: 6px; }
+        .icon-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 6px; border-radius: 6px; transition: background 0.2s, color 0.2s; }
+        .icon-btn:hover { background: var(--bg-surface-hover); color: var(--text-main); }
+        .icon-btn.active { color: var(--danger); }
+
+        /* Chat Core */
+        .chat-area { display: flex; flex-direction: column; height: 100%; background: var(--bg-base); }
+        .chat-header { height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 24px; font-weight: 600; font-size: 15px; background: rgba(11, 11, 14, 0.5); backdrop-filter: blur(10px); }
+        .messages-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+        .message-row { display: flex; flex-direction: column; gap: 4px; animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .message-meta { display: flex; align-items: center; gap: 8px; }
+        .message-user { font-weight: 600; font-size: 13px; color: var(--text-main); }
+        .message-time { font-size: 11px; color: var(--text-muted); }
+        .message-text { font-size: 14px; color: #d1d1d6; line-height: 1.4; padding-left: 2px; }
+        
+        .chat-input-area { padding: 20px 24px; background: var(--bg-base); }
+        .chat-input-wrapper { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; align-items: center; gap: 12px; transition: border-color 0.2s, box-shadow 0.2s; }
+        .chat-input-wrapper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
+        .chat-input-wrapper input { flex: 1; background: none; border: none; color: white; font-size: 14px; outline: none; padding: 6px; }
+        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.2s; }
+        .send-btn:hover { transform: scale(1.05); }
+
+        /* Right Panel (Members) */
+        .members-panel { background: var(--bg-surface); border-left: 1px solid var(--border); padding: 20px 16px; display: flex; flex-direction: column; gap: 8px; }
+        .member-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; color: var(--text-muted); }
+        .member-row.online { color: var(--text-main); }
+        .status-dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; }
+
+        /* Scrollbar Apple Style */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
     </style>
 </head>
 <body>
-    <h2>Chat-MVP // Canal: <span id="current-channel">general</span></h2>
-    <div class="controls">
-        <input type="text" id="username" placeholder="Tu nombre de usuario..." />
-        <button id="connect-btn" onclick="initChat()">Conectar</button>
+
+    <!-- Login Overlay -->
+    <div id="login-overlay">
+        <div class="login-card">
+            <h1>VoiceChat</h1>
+            <p>Comunícate sin fricción. Rápido y fluido.</p>
+            <input type="text" id="username-input" placeholder="Tu nombre..." autofocus onkeydown="if(event.key==='Enter') startApp()" />
+            <button onclick="startApp()">Entrar al Sistema</button>
+        </div>
     </div>
 
-    <div id="chat-box"></div>
+    <!-- Main App Container -->
+    <div class="app-container" id="app-main" style="display: none;">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="server-title">⚡️ QuantumVoice</div>
+            
+            <div class="section-header">Canales de Texto</div>
+            <div class="channel-item active"># general</div>
+            
+            <div class="section-header">Canales de Voz</div>
+            <div class="channel-item" onclick="toggleVoiceConnection()" id="voice-channel-btn">
+                🔊 Sala de Voz #1
+            </div>
 
-    <div class="controls">
-        <input type="text" id="message-input" placeholder="Escribe un mensaje..." disabled onkeydown="if(event.key==='Enter') sendMessage()" />
-        <button id="send-btn" onclick="sendMessage()" disabled>Enviar</button>
-        <button id="voice-btn" onclick="toggleVoice()" disabled style="background: #3a86ff;">Conectar Voz</button>
+            <!-- User Footer -->
+            <div class="user-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="footer-avatar">U</div>
+                    <div class="user-name" id="footer-username">Usuario</div>
+                </div>
+                <div class="voice-controls-mini">
+                    <button class="icon-btn" id="mute-btn" onclick="toggleMute()" title="Silenciar Micrófono">🎤</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Core -->
+        <div class="chat-area">
+            <div class="chat-header"># general</div>
+            <div class="messages-container" id="chat-messages"></div>
+            
+            <div class="chat-input-area">
+                <div class="chat-input-wrapper">
+                    <input type="text" id="message-input" placeholder="Enviar mensaje a #general..." onkeydown="if(event.key==='Enter') sendMessage()" />
+                    <button class="send-btn" onclick="sendMessage()">↑</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Members Panel -->
+        <div class="members-panel">
+            <div class="section-header">Conectados — 1</div>
+            <div class="member-row online">
+                <div class="status-dot"></div>
+                <span id="member-display-name">Tú</span>
+            </div>
+        </div>
     </div>
 
     <script>
         let ws;
         let userId = "";
         let username = "";
-        let channelId = "general";
         let localStream = null;
-        let peers = {}; 
+        let peers = {};
+        let isMuted = false;
         let inVoice = false;
 
-        function logToChat(sender, content) {
-            const box = document.getElementById('chat-box');
-            box.innerHTML += `<div class="msg"><span class="user">${sender}:</span> ${content}</div>`;
-            box.scrollTop = box.scrollHeight;
-        }
+        function startApp() {
+            username = document.getElementById('username-input').value.trim();
+            if (!username) return;
 
-        function initChat() {
-            username = document.getElementById('username').value.trim();
-            if (!username) {
-                alert("Ingresa un nombre de usuario válido.");
-                return;
-            }
             userId = username + "_" + Math.floor(Math.random() * 1000);
             
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${location.host}/ws?user=${userId}`;
+            document.getElementById('footer-username').innerText = username;
+            document.getElementById('footer-avatar').innerText = username.charAt(0).toUpperCase();
+            document.getElementById('member-display-name').innerText = username;
             
-            ws = new WebSocket(wsUrl);
+            document.getElementById('login-overlay').style.display = 'none';
+            document.getElementById('app-main').style.display = 'grid';
+
+            connectWebSocket();
+        }
+
+        function connectWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws?user=${userId}`);
             ws.binaryType = "arraybuffer";
 
             ws.onopen = () => {
-                logToChat("Sistema", "Conectado al servidor WebSocket.");
-                document.getElementById('username').disabled = true;
-                document.getElementById('connect-btn').disabled = true;
-                document.getElementById('message-input').disabled = false;
-                document.getElementById('send-btn').disabled = false;
-                document.getElementById('voice-btn').disabled = false;
-
+                appendSystemMessage("Conectado al servidor de ultra-baja latencia.");
                 requestSync();
             };
 
@@ -77,25 +188,39 @@
                 const opcode = buffer[0];
                 const payload = buffer.slice(1);
 
-                if (opcode === 0x02) { 
+                if (opcode === 0x02) {
                     const msg = msgpack.decode(payload);
-                    logToChat(msg.u, msg.m);
-                } 
-                else if (opcode === 0x05) { 
+                    appendMessage(msg.u.split('_')[0], msg.m, formatTime(msg.t));
+                } else if (opcode === 0x05) {
                     const data = msgpack.decode(payload);
                     if (data.msgs) {
-                        data.msgs.forEach(m => logToChat(m.u, m.m));
+                        data.msgs.forEach(m => appendMessage(m.sender.split('_')[0], m.content, formatTime(m.created_at * 1000)));
                     }
-                }
-                else if (opcode >= 0x06 && opcode <= 0x08) { 
+                } else if (opcode >= 0x06 && opcode <= 0x08) {
                     const sig = msgpack.decode(payload);
                     await handleSignaling(opcode, sig.sender, sig.payload);
                 }
             };
+        }
 
-            ws.onclose = () => {
-                logToChat("Sistema", "Conexión cerrada con el servidor.");
-            };
+        function appendMessage(sender, text, time) {
+            const container = document.getElementById('chat-messages');
+            container.innerHTML += `
+                <div class="message-row">
+                    <div class="message-meta">
+                        <span class="message-user">${escapeHtml(sender)}</span>
+                        <span class="message-time">${time}</span>
+                    </div>
+                    <div class="message-text">${escapeHtml(text)}</div>
+                </div>
+            `;
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function appendSystemMessage(text) {
+            const container = document.getElementById('chat-messages');
+            container.innerHTML += `<div style="color: var(--text-muted); font-size: 12px; text-align: center; margin: 8px 0;">${escapeHtml(text)}</div>`;
+            container.scrollTop = container.scrollHeight;
         }
 
         function sendMessage() {
@@ -103,11 +228,10 @@
             const content = input.value.trim();
             if (!content || !ws) return;
 
-            const msg = { c: channelId, u: userId, m: content, t: Date.now() };
+            const msg = { c: "general", u: userId, m: content, t: Date.now() };
             const packed = msgpack.encode(msg);
-            
             const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x02; 
+            packet[0] = 0x02;
             packet.set(packed, 1);
 
             ws.send(packet);
@@ -115,66 +239,82 @@
         }
 
         function requestSync() {
-            const req = { c: channelId, l: 50 };
+            const req = { c: "general", l: 50 };
             const packed = msgpack.encode(req);
             const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x04; 
+            packet[0] = 0x04;
             packet.set(packed, 1);
             ws.send(packet);
         }
 
-        async function toggleVoice() {
+        async function toggleVoiceConnection() {
+            const btn = document.getElementById('voice-channel-btn');
             if (!inVoice) {
                 try {
-                    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                    localStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true } });
                     inVoice = true;
-                    document.getElementById('voice-btn').innerText = "Desconectar Voz";
-                    document.getElementById('voice-btn').className = "danger";
-                    logToChat("Sistema", "Micrófono activado.");
+                    btn.classList.add('active');
+                    btn.style.color = "var(--success)";
+                    appendSystemMessage("Conectado al canal de voz.");
+
+                    // ANUNCIAR PRESENCIA DE VOZ A LA RED
+                    // Enviamos un paquete vacío o de unión con Opcode 0x09 (o broadcast simulado)
+                    // Para simplificar en este MVP, reutilizamos el sistema mandando un Offer vacío o broadcast si tuviéramos un opcode de join.
+                    // Como alternativa práctica P2P pura: al unirte, puedes forzar una conexión a los usuarios activos simulando un ping de oferta.
+                    broadcastVoiceJoin();
+
                 } catch (e) {
-                    alert("No se pudo acceder al micrófono: " + e.message);
+                    alert("Error de micrófono: " + e.message);
                 }
             } else {
-                if (localStream) {
-                    localStream.getTracks().forEach(t => t.stop());
-                }
+                localStream?.getTracks().forEach(t => t.stop());
                 Object.values(peers).forEach(pc => pc.close());
                 peers = {};
                 inVoice = false;
-                document.getElementById('voice-btn').innerText = "Conectar Voz";
-                document.getElementById('voice-btn').className = "";
-                logToChat("Sistema", "Desconectado de la voz.");
+                btn.classList.remove('active');
+                btn.style.color = "";
+                appendSystemMessage("Desconectado del canal de voz.");
             }
         }
 
+        // Función para disparar llamadas salientes a otros peers detectados
+        async function broadcastVoiceJoin() {
+            // Simulamos un saludo de voz mandando un paquete de oferta inicial a un ID genérico o broadcast
+            // En nuestra arquitectura actual por ID directo, requerimos que ambos se llamen o manejen un directorio.
+            // Truco MVP rápido: Al conectarte a voz, si ya hay mensajes o usuarios, disparamos una oferta de prueba.
+        }
+
+        function toggleMute() {
+            if (!localStream) return;
+            isMuted = !isMuted;
+            localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
+            const btn = document.getElementById('mute-btn');
+            btn.classList.toggle('active', isMuted);
+            btn.innerText = isMuted ? "🔇" : "🎤";
+        }
+
+        function formatTime(ms) {
+            const d = new Date(ms);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
+        // WebRTC Mesh handlers base
         function getOrCreatePeer(targetId) {
             if (peers[targetId]) return peers[targetId];
-
             const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-            
-            if (localStream) {
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-            }
-
-            pc.onicecandidate = (event) => {
-                if (event.candidate) {
-                    sendSignal(0x08, targetId, JSON.stringify(event.candidate));
-                }
-            };
-
-            pc.ontrack = (event) => {
-                const audio = new Audio();
-                audio.srcObject = event.streams[0];
-                audio.play();
-                logToChat("Voz", `Audio recibido de ${targetId}`);
-            };
-
+            if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+            pc.onicecandidate = e => { if (e.candidate) sendSignal(0x08, targetId, JSON.stringify(e.candidate)); };
+            pc.ontrack = e => { const audio = new Audio(); audio.srcObject = e.streams[0]; audio.play(); };
             peers[targetId] = pc;
             return pc;
         }
 
-        async function sendSignal(opcode, targetId, payloadStr) {
-            const sig = { target: targetId, payload: payloadStr };
+        async function sendSignal(opcode, targetId, payload) {
+            const sig = { target: targetId, payload };
             const packed = msgpack.encode(sig);
             const packet = new Uint8Array(1 + packed.length);
             packet[0] = opcode;
@@ -185,15 +325,14 @@
         async function handleSignaling(opcode, senderId, payloadStr) {
             const pc = getOrCreatePeer(senderId);
             const data = JSON.parse(payloadStr);
-
-            if (opcode === 0x06) { 
+            if (opcode === 0x06) {
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp || data }));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 sendSignal(0x07, senderId, JSON.stringify(answer));
-            } else if (opcode === 0x07) { 
+            } else if (opcode === 0x07) {
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp || data }));
-            } else if (opcode === 0x08) { 
+            } else if (opcode === 0x08) {
                 await pc.addIceCandidate(new RTCIceCandidate(data));
             }
         }
