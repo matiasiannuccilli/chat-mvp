@@ -55,10 +55,10 @@ type Hub struct {
 	unregister  chan *Client
 	dbQueue     chan TextMsg
 	db          *sql.DB
+	mu          sync.RWMutex
 	voiceUsers  map[string]bool
 	onlineUsers map[string]string
 }
-
 var (
 	managerMu sync.RWMutex
 	hubs      = make(map[string]*Hub)
@@ -88,8 +88,12 @@ func getHub(serverID string, db *sql.DB) *Hub {
 
 func (c *Client) kick() {
 	c.once.Do(func() {
-		close(c.done)
-		c.conn.Close(websocket.StatusPolicyViolation, "slow client")
+		if c.done != nil {
+			close(c.done)
+		}
+		if c.conn != nil {
+			c.conn.Close(websocket.StatusPolicyViolation, "slow client")
+		}
 	})
 }
 
@@ -213,13 +217,15 @@ func (c *Client) readPump() {
 				vp.User = c.id
 				out, _ := json.Marshal(vp)
 				pkt := append([]byte{0x09}, out...)
+
+				c.hub.mu.Lock()
 				if vp.Action == "join" {
-					c.hub.register <- &Client{id: "voice_join"} // Señal interna
 					c.hub.voiceUsers[c.id] = true
 				} else {
-					c.hub.register <- &Client{id: "voice_leave"}
 					delete(c.hub.voiceUsers, c.id)
 				}
+				c.hub.mu.Unlock()
+
 				c.hub.broadcast <- pkt
 			}
 
