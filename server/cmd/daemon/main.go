@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,10 +13,10 @@ import (
 
 	"github.com/coder/websocket"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type TextMsg struct {
+	ServerID  string `json:"s"`
 	ChannelID string `json:"c"`
 	Sender    string `json:"u"`
 	Content   string `json:"m"`
@@ -28,42 +29,66 @@ type SignalPacket struct {
 	Payload string `json:"payload"`
 }
 
+type Presence struct {
+	User   string `json:"user"`
+	Name   string `json:"name"`
+	Action string `json:"action"`
+}
+
 type Client struct {
-	id   string
-	conn *websocket.Conn
-	hub  *Hub
-	send chan []byte
+	id     string
+	name   string
+	server string
+	conn   *websocket.Conn
+	hub    *Hub
+	send   chan []byte
 }
 
 type Hub struct {
-	clients    map[string]*Client
-	broadcast  chan []byte
-	register   chan *Client
-	unregister chan *Client
-	dbQueue    chan TextMsg
-	db         *sql.DB
-	mu         sync.RWMutex
+	id          string
+	clients     map[string]*Client
+	broadcast   chan []byte
+	register    chan *Client
+	unregister  chan *Client
+	dbQueue     chan TextMsg
+	db          *sql.DB
+	mu          sync.RWMutex
+	voiceUsers  map[string]bool
+	onlineUsers map[string]string // ID -> Name
 }
 
-func newHub(db *sql.DB) *Hub {
-	return &Hub{
-		clients:    make(map[string]*Client),
-		broadcast:  make(chan []byte, 256),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		dbQueue:    make(chan TextMsg, 1024),
-		db:         db,
+var (
+	managerMu sync.RWMutex
+	hubs      = make(map[string]*Hub)
+)
+
+func getHub(serverID string, db *sql.DB) *Hub {
+	managerMu.Lock()
+	defer managerMu.Unlock()
+	if h, ok := hubs[serverID]; ok {
+		return h
 	}
+	h := &Hub{
+		id:          serverID,
+		clients:     make(map[string]*Client),
+		broadcast:   make(chan []byte, 256),
+		register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		dbQueue:     make(chan TextMsg, 1024),
+		db:          db,
+		voiceUsers:  make(map[string]bool),
+		onlineUsers: make(map[string]string),
+	}
+	hubs[serverID] = h
+	go h.run()
+	return h
 }
 
 func (h *Hub) run() {
 	go func() {
-		stmt, err := h.db.Prepare("INSERT INTO messages(channel_id, sender, content, created_at) VALUES(?, ?, ?, ?)")
-		if err != nil {
-			log.Fatalf("Error preparando stmt SQL: %v", err)
-		}
+		stmt, _ := h.db.Prepare("INSERT INTO messages(server_id, channel_id, sender, content, created_at) VALUES(?, ?, ?, ?, ?)")
 		for msg := range h.dbQueue {
-			stmt.Exec(msg.ChannelID, msg.Sender, msg.Content, msg.Timestamp)
+			stmt.Exec(msg.ServerID, msg.ChannelID, msg.Sender, msg.Content, msg.Timestamp)
 		}
 	}()
 
@@ -72,14 +97,29 @@ func (h *Hub) run() {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client.id] = client
+			h.onlineUsers[client.id] = client.name
 			h.mu.Unlock()
+			joinMsg, _ := json.Marshal(Presence{User: client.id, Name: client.name, Action: "join"})
+			h.broadcast <- append([]byte{0x0B}, joinMsg...)
+
 		case client := <-h.unregister:
 			h.mu.Lock()
 			if _, ok := h.clients[client.id]; ok {
 				delete(h.clients, client.id)
+				delete(h.onlineUsers, client.id)
 				close(client.send)
 			}
 			h.mu.Unlock()
+			leaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
+			h.broadcast <- append([]byte{0x0B}, leaveMsg...)
+			if h.voiceUsers[client.id] {
+				h.mu.Lock()
+				delete(h.voiceUsers, client.id)
+				h.mu.Unlock()
+				vLeaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
+				h.broadcast <- append([]byte{0x09}, vLeaveMsg...)
+			}
+
 		case message := <-h.broadcast:
 			h.mu.RLock()
 			for _, client := range h.clients {
@@ -95,18 +135,16 @@ func (h *Hub) run() {
 	}
 }
 
-func (h *Hub) getRecentMessages(channelID string, limit int) ([]TextMsg, error) {
-	query := `SELECT channel_id, sender, content, created_at FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?`
-	rows, err := h.db.Query(query, channelID, limit)
+func (h *Hub) getRecentMessages(channelID int) ([]TextMsg, error) {
+	rows, err := h.db.Query(`SELECT sender, content, created_at FROM messages WHERE server_id = ? AND channel_id = 'general' ORDER BY id DESC LIMIT 50`, h.id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var list []TextMsg
 	for rows.Next() {
 		var m TextMsg
-		if err := rows.Scan(&m.ChannelID, &m.Sender, &m.Content, &m.Timestamp); err == nil {
+		if err := rows.Scan(&m.Sender, &m.Content, &m.Timestamp); err == nil {
 			list = append(list, m)
 		}
 	}
@@ -138,24 +176,36 @@ func (c *Client) readPump() {
 		case 0x02:
 			var msg TextMsg
 			if err := json.Unmarshal(payload, &msg); err == nil {
+				msg.ServerID = c.server
 				c.hub.broadcast <- data
 				c.hub.dbQueue <- msg
 			}
 		case 0x04:
-			var req struct {
-				ChannelID string `msgpack:"c"`
-				Limit     int    `msgpack:"l"`
+			history, _ := c.hub.getRecentMessages(50)
+			resp, _ := json.Marshal(map[string]any{"c": "general", "msgs": history})
+			c.send <- append([]byte{0x05}, resp...)
+
+			c.hub.mu.RLock()
+			var vUsers []string
+			for u := range c.hub.voiceUsers {
+				vUsers = append(vUsers, u)
 			}
-			if err := json.Unmarshal(payload, &req); err == nil {
-				if req.Limit <= 0 || req.Limit > 100 {
-					req.Limit = 50
-				}
-				history, _ := c.hub.getRecentMessages(req.ChannelID, req.Limit)
-				resp, _ := json.Marshal(map[string]any{"c": req.ChannelID, "msgs": history})
-				c.send <- append([]byte{0x05}, resp...)
-			}
+			syncResp, _ := json.Marshal(map[string]any{"voice": vUsers, "online": c.hub.onlineUsers})
+			c.hub.mu.RUnlock()
+			c.send <- append([]byte{0x0A}, syncResp...)
+
 		case 0x09:
-			c.hub.broadcast <- data
+			var vp Presence
+			if err := json.Unmarshal(payload, &vp); err == nil {
+				c.hub.mu.Lock()
+				if vp.Action == "join" {
+					c.hub.voiceUsers[vp.User] = true
+				} else {
+					delete(c.hub.voiceUsers, vp.User)
+				}
+				c.hub.mu.Unlock()
+				c.hub.broadcast <- data
+			}
 		case 0x06, 0x07, 0x08:
 			var sig SignalPacket
 			if err := json.Unmarshal(payload, &sig); err == nil {
@@ -173,89 +223,51 @@ func (c *Client) readPump() {
 
 func (c *Client) writePump() {
 	for message := range c.send {
-		err := c.conn.Write(context.Background(), websocket.MessageBinary, message)
-		if err != nil {
-			break
-		}
+		c.conn.Write(context.Background(), websocket.MessageBinary, message)
 	}
 }
 
 func initDB(path string) *sql.DB {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL")
-	if err != nil {
-		log.Fatalf("Error abriendo SQLite: %v", err)
-	}
-
-	schema := `
-	CREATE TABLE IF NOT EXISTS messages (
+	db, _ := sql.Open("sqlite3", path+"?_journal_mode=WAL")
+	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		server_id TEXT NOT NULL,
 		channel_id TEXT NOT NULL,
 		sender TEXT NOT NULL,
 		content TEXT NOT NULL,
 		created_at INTEGER NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_channel_created ON messages(channel_id, id DESC);
-	CREATE TRIGGER IF NOT EXISTS prune_5k_limit
-	AFTER INSERT ON messages
-	BEGIN
-		DELETE FROM messages 
-		WHERE channel_id = NEW.channel_id 
-		  AND id <= (
-			  SELECT id FROM messages 
-			  WHERE channel_id = NEW.channel_id 
-			  ORDER BY id DESC 
-			  LIMIT 1 OFFSET 5000
-		  );
-	END;
-	`
-	if _, err := db.Exec(schema); err != nil {
-		log.Fatalf("Error inicializando esquema: %v", err)
-	}
+	);`)
 	return db
 }
 
 func main() {
-	dbPath := os.Getenv("DB_PATH")
-	if dbPath == "" {
-		dbPath = "./data/chat.db"
-	}
-
-	db := initDB(dbPath)
+	db := initDB("./data/chat_v2.db")
 	defer db.Close()
 
-	hub := newHub(db)
-	go hub.run()
-
-	fs := http.FileServer(http.Dir("./public"))
-	http.Handle("/", fs)
-
+	http.Handle("/", http.FileServer(http.Dir("./public")))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true,
-		})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
 		}
-
-		clientID := r.URL.Query().Get("user")
-		if clientID == "" {
-			clientID = fmt.Sprintf("peer-%d", time.Now().UnixNano())
+		q := r.URL.Query()
+		serverID := q.Get("server")
+		if serverID == "" {
+			serverID = "global"
 		}
-
 		client := &Client{
-			id:   clientID,
-			conn: conn,
-			hub:  hub,
-			send: make(chan []byte, 64),
+			id:     q.Get("user"),
+			name:   q.Get("name"),
+			server: serverID,
+			conn:   conn,
+			hub:    getHub(serverID, db),
+			send:   make(chan []byte, 64),
 		}
-
-		hub.register <- client
+		client.hub.register <- client
 		go client.writePump()
 		client.readPump()
 	})
 
-	log.Println("Servidor Go escuchando en :8080...")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal(err)
-	}
+	log.Println("Servidor Go Multi-Sala escuchando en :8080...")
+	http.ListenAndServe(":8080", nil)
 }

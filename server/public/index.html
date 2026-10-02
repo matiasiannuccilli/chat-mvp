@@ -3,395 +3,242 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QuantumVoice // TeamSpeak x Discord</title>
+    <title>QuantumVoice // Multi-Server</title>
     <style>
         :root {
-            --bg-base: #0b0b0e;
-            --bg-surface: #141418;
-            --bg-surface-hover: #1e1e24;
-            --accent: #2f80ed;
-            --accent-glow: rgba(47, 128, 237, 0.3);
-            --danger: #ff5c5c;
-            --success: #2ecc71;
-            --text-main: #f5f5f7;
-            --text-muted: #86868b;
+            --bg-base: #0b0b0e; --bg-surface: #141418; --bg-surface-hover: #1e1e24;
+            --accent: #2f80ed; --accent-glow: rgba(47, 128, 237, 0.3);
+            --danger: #ff5c5c; --success: #2ecc71;
+            --text-main: #f5f5f7; --text-muted: #86868b;
             --border: rgba(255, 255, 255, 0.06);
-            --radius-lg: 20px;
-            --radius-md: 12px;
-            --radius-sm: 8px;
+            --radius-lg: 20px; --radius-md: 12px; --radius-sm: 8px;
         }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
         body { background-color: var(--bg-base); color: var(--text-main); height: 100vh; overflow: hidden; display: flex; justify-content: center; align-items: center; }
-
-        /* Login Overlay */
         #login-overlay { position: fixed; inset: 0; background: rgba(11, 11, 14, 0.92); backdrop-filter: blur(20px); z-index: 1000; display: flex; justify-content: center; align-items: center; }
         .login-card { background: var(--bg-surface); border: 1px solid var(--border); padding: 40px; border-radius: var(--radius-lg); width: 380px; text-align: center; box-shadow: 0 30px 60px rgba(0,0,0,0.5); }
-        .login-card h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.5px; }
-        .login-card p { color: var(--text-muted); font-size: 14px; margin-bottom: 24px; }
-        .login-card input { width: 100%; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: var(--radius-md); color: white; font-size: 15px; outline: none; margin-bottom: 16px; transition: all 0.2s; }
-        .login-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
-        .login-card button { width: 100%; padding: 14px; background: var(--text-main); color: var(--bg-base); border: none; border-radius: var(--radius-md); font-weight: 600; font-size: 15px; cursor: pointer; transition: transform 0.1s, opacity 0.2s; }
-        .login-card button:hover { opacity: 0.9; transform: scale(1.01); }
-
-        /* App Layout */
+        .login-card h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
+        .login-card input { width: 100%; padding: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: var(--radius-md); color: white; font-size: 15px; outline: none; margin-bottom: 12px; }
+        .login-card button { width: 100%; padding: 14px; background: var(--text-main); color: var(--bg-base); border: none; border-radius: var(--radius-md); font-weight: 600; font-size: 15px; cursor: pointer; }
         .app-container { display: grid; grid-template-columns: 260px 1fr 240px; width: 100vw; height: 100vh; background: var(--bg-base); }
-        
-        /* Sidebar */
         .sidebar { background: var(--bg-surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px 12px; }
-        .server-title { font-weight: 600; font-size: 16px; padding: 0 12px 20px; letter-spacing: -0.3px; display: flex; align-items: center; gap: 8px; }
-        .section-header { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; padding: 12px 12px 6px; }
-        
-        .channel-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
-        .channel-item:hover { background: var(--bg-surface-hover); color: var(--text-main); }
-        .channel-item.active { background: var(--accent-glow); color: var(--accent); }
-
-        /* Voice Users Tree */
+        .server-title { font-weight: 600; font-size: 16px; padding: 0 12px 20px; display: flex; align-items: center; gap: 8px; }
+        .section-header { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; padding: 12px 12px 6px; }
+        .channel-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-size: 14px; font-weight: 500; }
+        .channel-item.active, .channel-item:hover { background: var(--bg-surface-hover); color: var(--text-main); }
         .voice-users-list { display: flex; flex-direction: column; gap: 2px; padding-left: 20px; margin-bottom: 8px; }
-        .voice-user-node { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 13px; color: var(--text-main); border-radius: var(--radius-sm); background: rgba(255,255,255,0.02); }
-        .mini-avatar { width: 22px; height: 22px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: white; }
-
-        /* User Footer */
-        .user-footer { margin-top: auto; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); }
-        .user-info { display: flex; align-items: center; gap: 10px; }
+        .voice-user-node { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 13px; color: var(--text-muted); border-radius: var(--radius-sm); transition: all 0.2s; }
+        .mini-avatar { width: 22px; height: 22px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: white; transition: box-shadow 0.1s; }
+        .speaking .mini-avatar { box-shadow: 0 0 0 3px var(--success); }
+        .speaking span { color: var(--text-main); font-weight: 600; }
+        .user-footer { margin-top: auto; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: var(--radius-md); display: flex; align-items: space-between; border: 1px solid var(--border); }
+        .user-info { display: flex; align-items: center; gap: 10px; flex: 1; }
         .user-avatar { width: 32px; height: 32px; background: linear-gradient(135deg, #2f80ed, #56ccf2); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; color: white; }
-        .user-name { font-size: 13px; font-weight: 500; }
-        .voice-controls-mini { display: flex; gap: 6px; }
-        .icon-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 6px; border-radius: 6px; transition: background 0.2s, color 0.2s; }
-        .icon-btn:hover { background: var(--bg-surface-hover); color: var(--text-main); }
+        .icon-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 6px; border-radius: 6px; }
         .icon-btn.active { color: var(--danger); background: rgba(255, 92, 92, 0.1); }
-
-        /* Chat Core */
-        .chat-area { display: flex; flex-direction: column; height: 100%; background: var(--bg-base); }
-        .chat-header { height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 24px; font-weight: 600; font-size: 15px; background: rgba(11, 11, 14, 0.5); backdrop-filter: blur(10px); }
+        .chat-area { display: flex; flex-direction: column; height: 100%; }
+        .chat-header { height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 24px; font-weight: 600; font-size: 15px; }
         .messages-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-        .message-row { display: flex; flex-direction: column; gap: 4px; }
         .message-meta { display: flex; align-items: center; gap: 8px; }
         .message-user { font-weight: 600; font-size: 13px; color: var(--text-main); }
         .message-time { font-size: 11px; color: var(--text-muted); }
-        .message-text { font-size: 14px; color: #d1d1d6; line-height: 1.4; padding-left: 2px; word-break: break-all; }
-        
-        .chat-input-area { padding: 20px 24px; background: var(--bg-base); }
-        .chat-input-wrapper { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; align-items: center; gap: 12px; transition: border-color 0.2s; }
-        .chat-input-wrapper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
-        .chat-input-wrapper input { flex: 1; background: none; border: none; color: white; font-size: 14px; outline: none; padding: 6px; }
-        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-
-        /* Members Panel */
+        .message-text { font-size: 14px; color: #d1d1d6; }
+        .chat-input-area { padding: 20px 24px; }
+        .chat-input-wrapper { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; align-items: center; gap: 12px; }
+        .chat-input-wrapper input { flex: 1; background: none; border: none; color: white; outline: none; }
+        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; }
         .members-panel { background: var(--bg-surface); border-left: 1px solid var(--border); padding: 20px 16px; display: flex; flex-direction: column; gap: 8px; }
-        .member-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; color: var(--text-muted); }
-        .member-row.online { color: var(--text-main); }
+        .member-row { display: flex; align-items: center; gap: 10px; padding: 8px; font-size: 13px; color: var(--text-main); }
         .status-dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; }
-
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
     </style>
 </head>
 <body>
-
     <div id="login-overlay">
         <div class="login-card">
             <h1>QuantumVoice</h1>
-            <p>TeamSpeak ligero & Discord amigable</p>
-            <input type="text" id="username-input" placeholder="Tu nombre..." autofocus onkeydown="if(event.key==='Enter') startApp()" />
-            <button onclick="startApp()">Entrar al Servidor</button>
+            <input type="text" id="server-input" placeholder="ID del Servidor (Ej: gaming01)" />
+            <input type="text" id="username-input" placeholder="Tu nombre..." onkeydown="if(event.key==='Enter') startApp()" />
+            <button onclick="startApp()">Conectar</button>
         </div>
     </div>
-
     <div class="app-container" id="app-main" style="display: none;">
         <div class="sidebar">
-            <div class="server-title">⚡️ QuantumVoice</div>
-            <div class="section-header">Canales de Texto</div>
+            <div class="server-title" id="server-title-ui">⚡️ QuantumVoice</div>
+            <div class="section-header">Texto</div>
             <div class="channel-item active"># general</div>
-            <div class="section-header">Canales de Voz</div>
-            <div class="channel-item" onclick="toggleVoiceConnection()" id="voice-channel-btn">
-                🔊 Sala de Voz #1
-            </div>
+            <div class="section-header">Voz</div>
+            <div class="channel-item" onclick="toggleVoice()" id="voice-btn">🔊 Sala de Voz #1</div>
             <div class="voice-users-list" id="voice-users-container"></div>
-
             <div class="user-footer">
                 <div class="user-info">
-                    <div class="user-avatar" id="footer-avatar">U</div>
-                    <div class="user-name" id="footer-username">Usuario</div>
+                    <div class="user-avatar" id="f-avatar">U</div>
+                    <div style="font-size: 13px; font-weight: 500;" id="f-name">Usuario</div>
                 </div>
-                <div class="voice-controls-mini">
-                    <button class="icon-btn" id="mute-btn" onclick="toggleMute()" title="Silenciar">🎤</button>
-                </div>
+                <button class="icon-btn" id="mute-btn" onclick="toggleMute()">🎤</button>
             </div>
         </div>
-
         <div class="chat-area">
             <div class="chat-header"># general</div>
-            <div class="messages-container" id="chat-messages"></div>
-            
+            <div class="messages-container" id="chat"></div>
             <div class="chat-input-area">
                 <div class="chat-input-wrapper">
-                    <input type="text" id="message-input" placeholder="Escribe un mensaje..." onkeydown="if(event.key==='Enter') sendMessage()" />
-                    <button class="send-btn" onclick="sendMessage()">↑</button>
+                    <input type="text" id="msg-input" placeholder="Escribe..." onkeydown="if(event.key==='Enter') sendMsg()" />
+                    <button class="send-btn" onclick="sendMsg()">↑</button>
                 </div>
             </div>
         </div>
-
         <div class="members-panel">
-            <div class="section-header">Miembros Online</div>
-            <div class="member-row online">
-                <div class="status-dot"></div>
-                <span id="member-display-name">Tú</span>
-            </div>
+            <div class="section-header">Conectados</div>
+            <div id="members-container"></div>
         </div>
     </div>
 
     <script>
-        let ws;
-        let userId = "";
-        let username = "";
-        let localStream = null;
-        let peers = {};
-        let isMuted = false;
-        let inVoice = false;
-        let voiceUsers = new Set();
-        const encoder = new TextEncoder();
-        const decoder = new TextDecoder();
+        let ws, userId="", userName="", serverId="", localStream=null, peers={}, inVoice=false, isMuted=false;
+        let onlineUsers = {}, voiceUsers = new Set();
+        const enc = new TextEncoder(), dec = new TextDecoder();
+        const pack = obj => enc.encode(JSON.stringify(obj)), unpack = buf => JSON.parse(dec.decode(buf));
+        let audioCtx = null;
 
-        const pack = (obj) => encoder.encode(JSON.stringify(obj));
-        const unpack = (buf) => JSON.parse(decoder.decode(buf));
+        // Auto-fill server from URL ?server=CODE
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('server')) {
+            document.getElementById('server-input').value = urlParams.get('server');
+            document.getElementById('server-input').disabled = true;
+        }
 
         function startApp() {
-            username = document.getElementById('username-input').value.trim();
-            if (!username) return;
-
-            userId = username + "_" + Math.floor(Math.random() * 1000);
+            userName = document.getElementById('username-input').value.trim();
+            serverId = document.getElementById('server-input').value.trim() || 'global';
+            if (!userName) return;
+            userId = userName + "_" + Math.floor(Math.random()*1000);
             
-            document.getElementById('footer-username').innerText = username;
-            document.getElementById('footer-avatar').innerText = username.charAt(0).toUpperCase();
-            document.getElementById('member-display-name').innerText = username;
-            
+            document.getElementById('f-name').innerText = userName;
+            document.getElementById('f-avatar').innerText = userName.charAt(0).toUpperCase();
+            document.getElementById('server-title-ui').innerText = "⚡️ " + serverId.toUpperCase();
             document.getElementById('login-overlay').style.display = 'none';
             document.getElementById('app-main').style.display = 'grid';
 
-            connectWebSocket();
-        }
-
-        function connectWebSocket() {
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${location.host}/ws?user=${userId}`);
+            ws = new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws?user=${userId}&name=${userName}&server=${serverId}`);
             ws.binaryType = "arraybuffer";
 
-            ws.onopen = () => {
-                appendSystemMessage("Conectado al servidor.");
-                requestSync();
-            };
-
-            ws.onmessage = async (event) => {
-                const buffer = new Uint8Array(event.data);
-                const opcode = buffer[0];
-                const payload = buffer.slice(1);
-
-                if (opcode === 0x02) {
-                    const msg = unpack(payload);
-                    appendMessage(msg.u.split('_')[0], msg.m, formatTime(msg.t));
-                } else if (opcode === 0x05) {
-                    const data = unpack(payload);
-                    if (data.msgs) {
-                        data.msgs.forEach(m => appendMessage(m.sender.split('_')[0], m.content, formatTime(m.created_at * 1000)));
+            ws.onopen = () => ws.send(new Uint8Array([0x04, ...pack({c:"general", l:50})]));
+            ws.onmessage = async e => {
+                const op = new Uint8Array(e.data)[0], p = new Uint8Array(e.data).slice(1), data = unpack(p);
+                if (op === 0x02) {
+                    appendMsg(data.u.split('_')[0], data.m, new Date(data.t).toLocaleTimeString());
+                } else if (op === 0x05) {
+                    (data.msgs||[]).forEach(m => appendMsg(m.sender.split('_')[0], m.content, new Date(m.created_at*1000).toLocaleTimeString()));
+                } else if (op === 0x0A) { // Sync inicial
+                    onlineUsers = data.online || {};
+                    (data.voice||[]).forEach(u => voiceUsers.add(u));
+                    renderUI();
+                } else if (op === 0x0B) { // Online presences
+                    if (data.action === "join") onlineUsers[data.user] = data.name;
+                    else delete onlineUsers[data.user];
+                    renderUI();
+                } else if (op === 0x09) { // Voice presences
+                    if (data.action === "join") {
+                        voiceUsers.add(data.user);
+                        if (inVoice && data.user !== userId && !peers[data.user]) connectPeer(data.user);
+                    } else {
+                        voiceUsers.delete(data.user);
+                        if (peers[data.user]) { peers[data.user].close(); delete peers[data.user]; }
                     }
-                } else if (opcode === 0x09) {
-                    const data = unpack(payload);
-                    handleVoicePresence(data.user, data.action);
-                } else if (opcode >= 0x06 && opcode <= 0x08) {
-                    const sig = unpack(payload);
-                    await handleSignaling(opcode, sig.sender, sig.payload);
+                    renderUI();
+                } else if (op >= 0x06 && op <= 0x08) {
+                    const pc = getPeer(data.sender);
+                    const sdp = JSON.parse(data.payload);
+                    if (op===0x06) {
+                        await pc.setRemoteDescription(new RTCSessionDescription({type:'offer',sdp:sdp.sdp||sdp}));
+                        const ans = await pc.createAnswer(); await pc.setLocalDescription(ans);
+                        ws.send(new Uint8Array([0x07, ...pack({target: data.sender, payload: JSON.stringify(ans)})]));
+                    } else if (op===0x07) await pc.setRemoteDescription(new RTCSessionDescription({type:'answer',sdp:sdp.sdp||sdp}));
+                    else if (op===0x08) await pc.addIceCandidate(new RTCIceCandidate(sdp));
                 }
             };
         }
 
-        function appendMessage(sender, text, time) {
-            const container = document.getElementById('chat-messages');
-            container.innerHTML += `
-                <div class="message-row">
-                    <div class="message-meta">
-                        <span class="message-user">${escapeHtml(sender)}</span>
-                        <span class="message-time">${time}</span>
-                    </div>
-                    <div class="message-text">${escapeHtml(text)}</div>
-                </div>
-            `;
-            container.scrollTop = container.scrollHeight;
+        function appendMsg(u, m, t) {
+            document.getElementById('chat').innerHTML += `<div class="message-row"><div class="message-meta"><span class="message-user">${u}</span><span class="message-time">${t}</span></div><div class="message-text">${m}</div></div>`;
+            document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
         }
 
-        function appendSystemMessage(text) {
-            const container = document.getElementById('chat-messages');
-            container.innerHTML += `<div style="color: var(--text-muted); font-size: 12px; text-align: center; margin: 8px 0;">${escapeHtml(text)}</div>`;
-            container.scrollTop = container.scrollHeight;
+        function sendMsg() {
+            const i = document.getElementById('msg-input'); if(!i.value) return;
+            ws.send(new Uint8Array([0x02, ...pack({c:"general", u:userId, m:i.value, t:Date.now()})]));
+            i.value = "";
         }
 
-        function sendMessage() {
-            const input = document.getElementById('message-input');
-            const content = input.value.trim();
-            if (!content || !ws) return;
-
-            const msg = { c: "general", u: userId, m: content, t: Date.now() };
-            const packed = pack(msg);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x02;
-            packet.set(packed, 1);
-
-            ws.send(packet);
-            input.value = "";
-        }
-
-        function requestSync() {
-            const req = { c: "general", l: 50 };
-            const packed = pack(req);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x04;
-            packet.set(packed, 1);
-            ws.send(packet);
-        }
-
-        async function toggleVoiceConnection() {
-            const btn = document.getElementById('voice-channel-btn');
+        async function toggleVoice() {
             if (!inVoice) {
                 try {
-                    localStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true } });
-                    inVoice = true;
-                    btn.classList.add('active');
-                    btn.style.color = "var(--success)";
-                    
-                    broadcastVoicePresence("join");
-                    renderVoiceUsers();
-
-                    voiceUsers.forEach(peerId => {
-                        if (peerId !== userId) connectToPeer(peerId);
-                    });
-                } catch (e) {
-                    alert("No se pudo acceder al micrófono: " + e.message);
-                }
+                    localStream = await navigator.mediaDevices.getUserMedia({audio:true});
+                    inVoice = true; document.getElementById('voice-btn').style.color = "var(--success)";
+                    ws.send(new Uint8Array([0x09, ...pack({user: userId, action: "join"})]));
+                    voiceUsers.add(userId); renderUI();
+                    monitorAudio(localStream, userId); // VAD Local
+                    voiceUsers.forEach(id => { if (id !== userId) connectPeer(id); });
+                } catch(e) { alert("Mic error"); }
             } else {
-                localStream?.getTracks().forEach(t => t.stop());
-                Object.values(peers).forEach(pc => pc.close());
-                peers = {};
-                inVoice = false;
-                btn.classList.remove('active');
-                btn.style.color = "";
-                
-                broadcastVoicePresence("leave");
-                renderVoiceUsers();
+                localStream?.getTracks().forEach(t=>t.stop());
+                Object.values(peers).forEach(p=>p.close()); peers = {}; inVoice = false;
+                document.getElementById('voice-btn').style.color = "";
+                ws.send(new Uint8Array([0x09, ...pack({user: userId, action: "leave"})]));
+                voiceUsers.delete(userId); renderUI();
             }
         }
 
-        function broadcastVoicePresence(action) {
-            if (!ws) return;
-            const presence = { user: userId, action: action };
-            const packed = pack(presence);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = 0x09;
-            packet.set(packed, 1);
-            ws.send(packet);
+        function getPeer(id) {
+            if (peers[id]) return peers[id];
+            const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+            if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+            pc.onicecandidate = e => { if (e.candidate) ws.send(new Uint8Array([0x08, ...pack({target: id, payload: JSON.stringify(e.candidate)})])); };
+            pc.ontrack = e => { 
+                const a = document.createElement('audio'); a.srcObject = e.streams[0]; a.autoplay = true; document.body.appendChild(a);
+                monitorAudio(e.streams[0], id); // VAD Remoto
+            };
+            peers[id] = pc; return pc;
         }
 
-        function handleVoicePresence(peerId, action) {
-            if (action === "join") {
-                voiceUsers.add(peerId);
-                renderVoiceUsers();
-                if (inVoice && peerId !== userId && !peers[peerId]) {
-                    connectToPeer(peerId);
-                }
-            } else if (action === "leave") {
-                voiceUsers.delete(peerId);
-                renderVoiceUsers();
-                if (peers[peerId]) {
-                    peers[peerId].close();
-                    delete peers[peerId];
-                }
-            }
-        }
-
-        function renderVoiceUsers() {
-            const container = document.getElementById('voice-users-container');
-            container.innerHTML = "";
-            let activeList = Array.from(voiceUsers);
-            if (inVoice && !activeList.includes(userId)) {
-                activeList.push(userId);
-            }
-
-            activeList.forEach(id => {
-                const name = id.split('_')[0];
-                container.innerHTML += `
-                    <div class="voice-user-node">
-                        <div class="mini-avatar">${name.charAt(0).toUpperCase()}</div>
-                        <span>${escapeHtml(name)}</span>
-                    </div>
-                `;
-            });
-        }
-
-        async function connectToPeer(targetId) {
-            const pc = getOrCreatePeer(targetId);
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            sendSignal(0x06, targetId, JSON.stringify(offer));
+        async function connectPeer(id) {
+            const pc = getPeer(id), offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+            ws.send(new Uint8Array([0x06, ...pack({target: id, payload: JSON.stringify(offer)})]));
         }
 
         function toggleMute() {
-            if (!localStream) return;
-            isMuted = !isMuted;
+            if(!localStream) return; isMuted = !isMuted;
             localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
-            const btn = document.getElementById('mute-btn');
-            btn.classList.toggle('active', isMuted);
-            btn.innerText = isMuted ? "🔇" : "🎤";
+            document.getElementById('mute-btn').innerText = isMuted ? "🔇" : "🎤";
+            document.getElementById('mute-btn').className = isMuted ? "icon-btn active" : "icon-btn";
         }
 
-        function formatTime(ms) {
-            const d = new Date(ms);
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        function renderUI() {
+            const m = document.getElementById('members-container'); m.innerHTML = "";
+            Object.entries(onlineUsers).forEach(([id, name]) => {
+                m.innerHTML += `<div class="member-row"><div class="status-dot"></div><span>${name}</span></div>`;
+            });
+            const v = document.getElementById('voice-users-container'); v.innerHTML = "";
+            voiceUsers.forEach(id => {
+                const n = (onlineUsers[id] || id.split('_')[0]);
+                v.innerHTML += `<div class="voice-user-node" id="vu-${id}"><div class="mini-avatar">${n.charAt(0).toUpperCase()}</div><span>${n}</span></div>`;
+            });
         }
 
-        function escapeHtml(str) {
-            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
-
-        function getOrCreatePeer(targetId) {
-            if (peers[targetId]) return peers[targetId];
-            const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-            if (localStream) {
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        // Voice Activity Detection (VAD)
+        function monitorAudio(stream, id) {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const src = audioCtx.createMediaStreamSource(stream), anl = audioCtx.createAnalyser();
+            anl.fftSize = 256; src.connect(anl);
+            const data = new Uint8Array(anl.frequencyBinCount);
+            function check() {
+                anl.getByteFrequencyData(data);
+                let sum = 0; for(let i=0; i<data.length; i++) sum += data[i];
+                const node = document.getElementById(`vu-${id}`);
+                if (node) node.classList.toggle('speaking', (sum / data.length) > 15);
+                if (peers[id] || id === userId) requestAnimationFrame(check);
             }
-            pc.onicecandidate = e => { 
-                if (e.candidate) sendSignal(0x08, targetId, JSON.stringify(e.candidate)); 
-            };
-            pc.ontrack = e => { 
-                const audio = document.createElement('audio'); 
-                audio.srcObject = e.streams[0]; 
-                audio.autoplay = true;
-                document.body.appendChild(audio); // CRÍTICO PARA CELULARES
-            };
-            peers[targetId] = pc;
-            return pc;
-        }
-
-        async function sendSignal(opcode, targetId, payloadStr) {
-            const sig = { target: targetId, payload: payloadStr };
-            const packed = pack(sig);
-            const packet = new Uint8Array(1 + packed.length);
-            packet[0] = opcode;
-            packet.set(packed, 1);
-            ws.send(packet);
-        }
-
-        async function handleSignaling(opcode, senderId, payloadStr) {
-            const pc = getOrCreatePeer(senderId);
-            const data = JSON.parse(payloadStr);
-            if (opcode === 0x06) {
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp || data }));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                sendSignal(0x07, senderId, JSON.stringify(answer));
-            } else if (opcode === 0x07) {
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp || data }));
-            } else if (opcode === 0x08) {
-                await pc.addIceCandidate(new RTCIceCandidate(data));
-            }
+            check();
         }
     </script>
 </body>
