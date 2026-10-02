@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VoiceChat // Apple-Grade MVP</title>
+    <title>QuantumVoice // TeamSpeak x Discord</title>
     <script src="https://unpkg.com/@msgpack/msgpack@2.8.0/dist/msgpack.min.js"></script>
     <style>
         :root {
@@ -26,7 +26,7 @@
         body { background-color: var(--bg-base); color: var(--text-main); height: 100vh; overflow: hidden; display: flex; justify-content: center; align-items: center; }
 
         /* Login Overlay */
-        #login-overlay { position: fixed; inset: 0; background: rgba(11, 11, 14, 0.85); backdrop-filter: blur(20px); z-index: 1000; display: flex; justify-content: center; align-items: center; }
+        #login-overlay { position: fixed; inset: 0; background: rgba(11, 11, 14, 0.9); backdrop-filter: blur(20px); z-index: 1000; display: flex; justify-content: center; align-items: center; }
         .login-card { background: var(--bg-surface); border: 1px solid var(--border); padding: 40px; border-radius: var(--radius-lg); width: 380px; text-align: center; box-shadow: 0 30px 60px rgba(0,0,0,0.5); }
         .login-card h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.5px; }
         .login-card p { color: var(--text-muted); font-size: 14px; margin-bottom: 24px; }
@@ -35,18 +35,24 @@
         .login-card button { width: 100%; padding: 14px; background: var(--text-main); color: var(--bg-base); border: none; border-radius: var(--radius-md); font-weight: 600; font-size: 15px; cursor: pointer; transition: transform 0.1s, opacity 0.2s; }
         .login-card button:hover { opacity: 0.9; transform: scale(1.01); }
 
-        /* App Layout (3 Columns) */
+        /* App Layout */
         .app-container { display: grid; grid-template-columns: 260px 1fr 240px; width: 100vw; height: 100vh; background: var(--bg-base); }
         
-        /* Sidebar Channels */
+        /* Sidebar */
         .sidebar { background: var(--bg-surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px 12px; }
         .server-title { font-weight: 600; font-size: 16px; padding: 0 12px 20px; letter-spacing: -0.3px; display: flex; align-items: center; gap: 8px; }
         .section-header { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; padding: 12px 12px 6px; }
+        
         .channel-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
         .channel-item:hover { background: var(--bg-surface-hover); color: var(--text-main); }
         .channel-item.active { background: var(--accent-glow); color: var(--accent); }
 
-        /* User Profile Footer inside Sidebar */
+        /* Voice Users Tree under Voice Channel */
+        .voice-users-list { display: flex; flex-direction: column; gap: 2px; padding-left: 20px; margin-bottom: 8px; }
+        .voice-user-node { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 13px; color: var(--text-main); border-radius: var(--radius-sm); background: rgba(255,255,255,0.02); }
+        .mini-avatar { width: 22px; height: 22px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: white; }
+
+        /* User Footer */
         .user-footer { margin-top: auto; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: var(--radius-md); display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); }
         .user-info { display: flex; align-items: center; gap: 10px; }
         .user-avatar { width: 32px; height: 32px; background: linear-gradient(135deg, #2f80ed, #56ccf2); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; color: white; }
@@ -54,37 +60,32 @@
         .voice-controls-mini { display: flex; gap: 6px; }
         .icon-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 6px; border-radius: 6px; transition: background 0.2s, color 0.2s; }
         .icon-btn:hover { background: var(--bg-surface-hover); color: var(--text-main); }
-        .icon-btn.active { color: var(--danger); }
+        .icon-btn.active { color: var(--danger); background: rgba(255, 92, 92, 0.1); }
 
         /* Chat Core */
         .chat-area { display: flex; flex-direction: column; height: 100%; background: var(--bg-base); }
         .chat-header { height: 60px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 24px; font-weight: 600; font-size: 15px; background: rgba(11, 11, 14, 0.5); backdrop-filter: blur(10px); }
         .messages-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-        .message-row { display: flex; flex-direction: column; gap: 4px; animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .message-row { display: flex; flex-direction: column; gap: 4px; }
         .message-meta { display: flex; align-items: center; gap: 8px; }
         .message-user { font-weight: 600; font-size: 13px; color: var(--text-main); }
         .message-time { font-size: 11px; color: var(--text-muted); }
-        .message-text { font-size: 14px; color: #d1d1d6; line-height: 1.4; padding-left: 2px; }
+        .message-text { font-size: 14px; color: #d1d1d6; line-height: 1.4; padding-left: 2px; word-break: break-all; }
         
         .chat-input-area { padding: 20px 24px; background: var(--bg-base); }
-        .chat-input-wrapper { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; align-items: center; gap: 12px; transition: border-color 0.2s, box-shadow 0.2s; }
+        .chat-input-wrapper { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; align-items: center; gap: 12px; transition: border-color 0.2s; }
         .chat-input-wrapper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
         .chat-input-wrapper input { flex: 1; background: none; border: none; color: white; font-size: 14px; outline: none; padding: 6px; }
-        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.2s; }
-        .send-btn:hover { transform: scale(1.05); }
+        .send-btn { background: var(--accent); color: white; border: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 
-        /* Right Panel (Members) */
+        /* Members Panel */
         .members-panel { background: var(--bg-surface); border-left: 1px solid var(--border); padding: 20px 16px; display: flex; flex-direction: column; gap: 8px; }
         .member-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; color: var(--text-muted); }
         .member-row.online { color: var(--text-main); }
         .status-dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; }
 
-        /* Scrollbar Apple Style */
         ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
     </style>
 </head>
 <body>
@@ -92,14 +93,14 @@
     <!-- Login Overlay -->
     <div id="login-overlay">
         <div class="login-card">
-            <h1>VoiceChat</h1>
-            <p>Comunícate sin fricción. Rápido y fluido.</p>
+            <h1>QuantumVoice</h1>
+            <p>TeamSpeak ligero & Discord amigable</p>
             <input type="text" id="username-input" placeholder="Tu nombre..." autofocus onkeydown="if(event.key==='Enter') startApp()" />
-            <button onclick="startApp()">Entrar al Sistema</button>
+            <button onclick="startApp()">Entrar al Servidor</button>
         </div>
     </div>
 
-    <!-- Main App Container -->
+    <!-- App Container -->
     <div class="app-container" id="app-main" style="display: none;">
         <!-- Sidebar -->
         <div class="sidebar">
@@ -112,6 +113,8 @@
             <div class="channel-item" onclick="toggleVoiceConnection()" id="voice-channel-btn">
                 🔊 Sala de Voz #1
             </div>
+            <!-- Lista de usuarios conectados a voz visualmente -->
+            <div class="voice-users-list" id="voice-users-container"></div>
 
             <!-- User Footer -->
             <div class="user-footer">
@@ -120,7 +123,7 @@
                     <div class="user-name" id="footer-username">Usuario</div>
                 </div>
                 <div class="voice-controls-mini">
-                    <button class="icon-btn" id="mute-btn" onclick="toggleMute()" title="Silenciar Micrófono">🎤</button>
+                    <button class="icon-btn" id="mute-btn" onclick="toggleMute()" title="Silenciar">🎤</button>
                 </div>
             </div>
         </div>
@@ -132,7 +135,7 @@
             
             <div class="chat-input-area">
                 <div class="chat-input-wrapper">
-                    <input type="text" id="message-input" placeholder="Enviar mensaje a #general..." onkeydown="if(event.key==='Enter') sendMessage()" />
+                    <input type="text" id="message-input" placeholder="Escribe un mensaje..." onkeydown="if(event.key==='Enter') sendMessage()" />
                     <button class="send-btn" onclick="sendMessage()">↑</button>
                 </div>
             </div>
@@ -140,7 +143,7 @@
 
         <!-- Members Panel -->
         <div class="members-panel">
-            <div class="section-header">Conectados — 1</div>
+            <div class="section-header">Miembros Online</div>
             <div class="member-row online">
                 <div class="status-dot"></div>
                 <span id="member-display-name">Tú</span>
@@ -156,6 +159,7 @@
         let peers = {};
         let isMuted = false;
         let inVoice = false;
+        let voiceUsers = new Set();
 
         function startApp() {
             username = document.getElementById('username-input').value.trim();
@@ -179,7 +183,7 @@
             ws.binaryType = "arraybuffer";
 
             ws.onopen = () => {
-                appendSystemMessage("Conectado al servidor de ultra-baja latencia.");
+                appendSystemMessage("Conectado al servidor.");
                 requestSync();
             };
 
@@ -196,6 +200,9 @@
                     if (data.msgs) {
                         data.msgs.forEach(m => appendMessage(m.sender.split('_')[0], m.content, formatTime(m.created_at * 1000)));
                     }
+                } else if (opcode === 0x09) { // Presencia de voz entrante
+                    const data = msgpack.decode(payload);
+                    handleVoicePresence(data.user, data.action);
                 } else if (opcode >= 0x06 && opcode <= 0x08) {
                     const sig = msgpack.decode(payload);
                     await handleSignaling(opcode, sig.sender, sig.payload);
@@ -247,6 +254,7 @@
             ws.send(packet);
         }
 
+        // --- SISTEMA DE VOZ Y PRESENCIA ---
         async function toggleVoiceConnection() {
             const btn = document.getElementById('voice-channel-btn');
             if (!inVoice) {
@@ -255,16 +263,15 @@
                     inVoice = true;
                     btn.classList.add('active');
                     btn.style.color = "var(--success)";
-                    appendSystemMessage("Conectado al canal de voz.");
+                    
+                    // Anunciar entrada a voz
+                    broadcastVoicePresence("join");
+                    renderVoiceUsers();
 
-                    // ANUNCIAR PRESENCIA DE VOZ A LA RED
-                    // Enviamos un paquete vacío o de unión con Opcode 0x09 (o broadcast simulado)
-                    // Para simplificar en este MVP, reutilizamos el sistema mandando un Offer vacío o broadcast si tuviéramos un opcode de join.
-                    // Como alternativa práctica P2P pura: al unirte, puedes forzar una conexión a los usuarios activos simulando un ping de oferta.
-                    broadcastVoiceJoin();
-
+                    // Si ya hay otros peers conocidos, iniciar llamadas salientes
+                    // En este MVP, al entrar a voz emitimos llamada a todos los que ya estén listos.
                 } catch (e) {
-                    alert("Error de micrófono: " + e.message);
+                    alert("No se pudo acceder al micrófono: " + e.message);
                 }
             } else {
                 localStream?.getTracks().forEach(t => t.stop());
@@ -273,15 +280,65 @@
                 inVoice = false;
                 btn.classList.remove('active');
                 btn.style.color = "";
-                appendSystemMessage("Desconectado del canal de voz.");
+                
+                broadcastVoicePresence("leave");
+                renderVoiceUsers();
             }
         }
 
-        // Función para disparar llamadas salientes a otros peers detectados
-        async function broadcastVoiceJoin() {
-            // Simulamos un saludo de voz mandando un paquete de oferta inicial a un ID genérico o broadcast
-            // En nuestra arquitectura actual por ID directo, requerimos que ambos se llamen o manejen un directorio.
-            // Truco MVP rápido: Al conectarte a voz, si ya hay mensajes o usuarios, disparamos una oferta de prueba.
+        function broadcastVoicePresence(action) {
+            if (!ws) return;
+            const presence = { user: userId, action: action };
+            const packed = msgpack.encode(presence);
+            const packet = new Uint8Array(1 + packed.length);
+            packet[0] = 0x09; // Opcode custom para presencia de voz
+            packet.set(packed, 1);
+            ws.send(packet);
+        }
+
+        function handleVoicePresence(peerId, action) {
+            if (action === "join") {
+                voiceUsers.add(peerId);
+                renderVoiceUsers();
+                // Si nosotros también estamos en voz, iniciamos la oferta WebRTC hacia este nuevo peer
+                if (inVoice && peerId !== userId) {
+                    connectToPeer(peerId);
+                }
+            } else if (action === "leave") {
+                voiceUsers.delete(peerId);
+                renderVoiceUsers();
+                if (peers[peerId]) {
+                    peers[peerId].close();
+                    delete peers[peerId];
+                }
+            }
+        }
+
+        function renderVoiceUsers() {
+            const container = document.getElementById('voice-users-container');
+            container.innerHTML = "";
+            // Incluirnos a nosotros si estamos en voz
+            let activeList = Array.from(voiceUsers);
+            if (inVoice && !activeList.includes(userId)) {
+                activeList.push(userId);
+            }
+
+            activeList.forEach(id => {
+                const name = id.split('_')[0];
+                container.innerHTML += `
+                    <div class="voice-user-node">
+                        <div class="mini-avatar">${name.charAt(0).toUpperCase()}</div>
+                        <span>${escapeHtml(name)}</span>
+                    </div>
+                `;
+            });
+        }
+
+        async function connectToPeer(targetId) {
+            const pc = getOrCreatePeer(targetId);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            sendSignal(0x06, targetId, JSON.stringify(offer));
         }
 
         function toggleMute() {
@@ -302,19 +359,23 @@
             return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         }
 
-        // WebRTC Mesh handlers base
+        // WebRTC Mesh handlers
         function getOrCreatePeer(targetId) {
             if (peers[targetId]) return peers[targetId];
             const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
             if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
             pc.onicecandidate = e => { if (e.candidate) sendSignal(0x08, targetId, JSON.stringify(e.candidate)); };
-            pc.ontrack = e => { const audio = new Audio(); audio.srcObject = e.streams[0]; audio.play(); };
+            pc.ontrack = e => { 
+                const audio = new Audio(); 
+                audio.srcObject = e.streams[0]; 
+                audio.play().catch(err => console.log("Audio autoplay blocked:", err)); 
+            };
             peers[targetId] = pc;
             return pc;
         }
 
-        async function sendSignal(opcode, targetId, payload) {
-            const sig = { target: targetId, payload };
+        async function sendSignal(opcode, targetId, payloadStr) {
+            const sig = { target: targetId, payload: payloadStr };
             const packed = msgpack.encode(sig);
             const packet = new Uint8Array(1 + packed.length);
             packet[0] = opcode;

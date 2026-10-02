@@ -154,6 +154,8 @@ func (c *Client) readPump() {
 				resp, _ := msgpack.Marshal(map[string]any{"c": req.ChannelID, "msgs": history})
 				c.send <- append([]byte{0x05}, resp...)
 			}
+		case 0x09: // <-- NUEVO: Broadcast de Presencia de Voz para el árbol de usuarios
+			c.hub.broadcast <- data
 		case 0x06, 0x07, 0x08:
 			var sig SignalPacket
 			if err := msgpack.Unmarshal(payload, &sig); err == nil {
@@ -166,8 +168,6 @@ func (c *Client) readPump() {
 				c.hub.mu.RUnlock()
 			}
 		}
-	}
-}
 
 func (c *Client) writePump() {
 	for message := range c.send {
