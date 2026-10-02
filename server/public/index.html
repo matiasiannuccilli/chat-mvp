@@ -63,12 +63,11 @@
         .context-menu label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; }
         .context-menu input[type=range] { width: 140px; accent-color: var(--accent); cursor: pointer; }
 
-        /* MODO MÓVIL RESPONSIVO */
         @media (max-width: 768px) {
             .app-container { display: flex; flex-direction: column; }
             .sidebar { max-height: 35vh; border-right: none; border-bottom: 1px solid var(--border); padding: 10px; }
-            .members-panel { display: none; } /* Oculto en móvil para ganar espacio */
-            .chat-area { flex: 1; height: 0; } /* Permite scroll interno */
+            .members-panel { display: none; }
+            .chat-area { flex: 1; height: 0; }
             .chat-header { height: 45px; padding: 0 15px; }
             .messages-container { padding: 15px; }
             .user-footer { padding: 6px 10px; }
@@ -115,7 +114,6 @@
         </div>
     </div>
 
-    <!-- Menú Contextual (Clic derecho / Long Press) -->
     <div id="context-menu" class="context-menu">
         <label>Volumen del Usuario</label>
         <input type="range" id="vol-slider" min="0" max="2" step="0.05" value="1" oninput="updateVolume(this.value)">
@@ -141,7 +139,6 @@
             if (!userName) return;
             userId = userName + "_" + Math.floor(Math.random()*1000);
             
-            // HACK MÓVIL: Iniciar AudioContext en el primer tap del usuario para desbloquear autoplay en iOS/Android
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             if (audioCtx.state === 'suspended') audioCtx.resume();
             
@@ -149,7 +146,7 @@
             document.getElementById('f-avatar').innerText = userName.charAt(0).toUpperCase();
             document.getElementById('server-title-ui').innerText = "⚡️ " + serverId.toUpperCase();
             document.getElementById('login-overlay').style.display = 'none';
-            document.getElementById('app-main').style.display = 'flex'; // Fix fallback para móvil
+            document.getElementById('app-main').style.display = 'flex'; 
             if(window.innerWidth > 768) document.getElementById('app-main').style.display = 'grid';
 
             ws = new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws?user=${userId}&name=${userName}&server=${serverId}`);
@@ -173,7 +170,10 @@
                 } else if (op === 0x09) { 
                     if (data.action === "join") {
                         voiceUsers.add(data.user);
-                        if (inVoice && data.user !== userId && !peers[data.user]) connectPeer(data.user);
+                        // RESOLUCIÓN GLARE: Solo llama el que tiene el ID alfabéticamente mayor
+                        if (inVoice && data.user !== userId && !peers[data.user]) {
+                            if (userId > data.user) connectPeer(data.user);
+                        }
                     } else {
                         voiceUsers.delete(data.user);
                         if (peers[data.user]) { peers[data.user].close(); delete peers[data.user]; }
@@ -216,7 +216,11 @@
                     ws.send(new Uint8Array([0x09, ...pack({user: userId, action: "join"})]));
                     voiceUsers.add(userId); renderUI();
                     monitorAudio(localStream); 
-                    voiceUsers.forEach(id => { if (id !== userId) connectPeer(id); });
+                    
+                    // RESOLUCIÓN GLARE: Solo llamamos a los que tengan ID menor
+                    voiceUsers.forEach(id => { 
+                        if (id !== userId && userId > id) connectPeer(id); 
+                    });
                 } catch(e) { alert("Mic error: Permisos requeridos."); }
             } else {
                 localStream?.getTracks().forEach(t=>t.stop());
@@ -230,7 +234,6 @@
 
         function getPeer(id) {
             if (peers[id]) return peers[id];
-            // STUN múltiple para mejorar NAT traversal móvil
             const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}, {urls:"stun:stun.cloudflare.com:3478"}]});
             if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
             pc.onicecandidate = e => { if (e.candidate) ws.send(new Uint8Array([0x08, ...pack({target: id, payload: JSON.stringify(e.candidate)})])); };
@@ -240,7 +243,7 @@
                     a = document.createElement('audio'); 
                     a.id = `audio-${id}`;
                     a.autoplay = true; 
-                    a.playsInline = true; // Crucial iOS
+                    a.playsInline = true; 
                     document.body.appendChild(a);
                 }
                 a.srcObject = e.streams[0]; 
@@ -294,7 +297,6 @@
             check();
         }
 
-        // Lógica del Menú Contextual Móvil/PC
         document.addEventListener('contextmenu', e => {
             const node = e.target.closest('.voice-user-node');
             if (node) {
@@ -305,7 +307,6 @@
                 selectedVolumeUser = targetId;
                 const menu = document.getElementById('context-menu');
                 menu.style.display = 'flex';
-                // Evitar que el menú se salga de la pantalla en móvil
                 const left = Math.min(e.pageX, window.innerWidth - 180);
                 menu.style.left = `${left}px`;
                 menu.style.top = `${e.pageY}px`;
