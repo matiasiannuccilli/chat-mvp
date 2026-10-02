@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat-MVP Ultra-Ligero</title>
+    <!-- MessagePack UMD CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.0.0-beta2/dist.min.js"></script>
+    <style>
+        body { font-family: monospace; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 95vh; box-sizing: border-box; }
+        #chat-box { flex: 1; border: 1px solid #333; background: #181818; padding: 15px; overflow-y: auto; margin-bottom: 15px; border-radius: 6px; }
+        .msg { margin-bottom: 8px; }
+        .msg span.user { color: #4ea8de; font-weight: bold; }
+        .controls { display: flex; gap: 10px; margin-bottom: 10px; }
+        input, button { padding: 10px; background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; font-family: monospace; }
+        input { flex: 1; }
+        button { cursor: pointer; background: #2b9348; border: none; }
+        button.danger { background: #d90429; }
+    </style>
+</head>
+<body>
+    <h2>Chat-MVP // Canal: <span id="current-channel">general</span></h2>
+    <div class="controls">
+        <input type="text" id="username" placeholder="Tu nombre de usuario..." />
+        <button id="connect-btn" onclick="initChat()">Conectar</button>
+    </div>
+
+    <div id="chat-box"></div>
+
+    <div class="controls">
+        <input type="text" id="message-input" placeholder="Escribe un mensaje..." disabled onkeydown="if(event.key==='Enter') sendMessage()" />
+        <button id="send-btn" onclick="sendMessage()" disabled>Enviar</button>
+        <button id="voice-btn" onclick="toggleVoice()" disabled style="background: #3a86ff;">Conectar Voz</button>
+    </div>
+
+    <script>
+        let ws;
+        let userId = "";
+        let username = "";
+        let channelId = "general";
+        let localStream = null;
+        let peers = {}; 
+        let inVoice = false;
+
+        function logToChat(sender, content) {
+            const box = document.getElementById('chat-box');
+            box.innerHTML += `<div class="msg"><span class="user">${sender}:</span> ${content}</div>`;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function initChat() {
+            username = document.getElementById('username').value.trim();
+            if (!username) {
+                alert("Ingresa un nombre de usuario válido.");
+                return;
+            }
+            userId = username + "_" + Math.floor(Math.random() * 1000);
+            
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${location.host}/ws?user=${userId}`;
+            
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = () => {
+                logToChat("Sistema", "Conectado al servidor WebSocket.");
+                document.getElementById('username').disabled = true;
+                document.getElementById('connect-btn').disabled = true;
+                document.getElementById('message-input').disabled = false;
+                document.getElementById('send-btn').disabled = false;
+                document.getElementById('voice-btn').disabled = false;
+
+                requestSync();
+            };
+
+            ws.onmessage = async (event) => {
+                const buffer = new Uint8Array(event.data);
+                const opcode = buffer[0];
+                const payload = buffer.slice(1);
+
+                if (opcode === 0x02) { 
+                    const msg = msgpack.decode(payload);
+                    logToChat(msg.u, msg.m);
+                } 
+                else if (opcode === 0x05) { 
+                    const data = msgpack.decode(payload);
+                    if (data.msgs) {
+                        data.msgs.forEach(m => logToChat(m.u, m.m));
+                    }
+                }
+                else if (opcode >= 0x06 && opcode <= 0x08) { 
+                    const sig = msgpack.decode(payload);
+                    await handleSignaling(opcode, sig.sender, sig.payload);
+                }
+            };
+
+            ws.onclose = () => {
+                logToChat("Sistema", "Conexión cerrada con el servidor.");
+            };
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('message-input');
+            const content = input.value.trim();
+            if (!content || !ws) return;
+
+            const msg = { c: channelId, u: userId, m: content, t: Date.now() };
+            const packed = msgpack.encode(msg);
+            
+            const packet = new Uint8Array(1 + packed.length);
+            packet[0] = 0x02; 
+            packet.set(packed, 1);
+
+            ws.send(packet);
+            input.value = "";
+        }
+
+        function requestSync() {
+            const req = { c: channelId, l: 50 };
+            const packed = msgpack.encode(req);
+            const packet = new Uint8Array(1 + packed.length);
+            packet[0] = 0x04; 
+            packet.set(packed, 1);
+            ws.send(packet);
+        }
+
+        async function toggleVoice() {
+            if (!inVoice) {
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                    inVoice = true;
+                    document.getElementById('voice-btn').innerText = "Desconectar Voz";
+                    document.getElementById('voice-btn').className = "danger";
+                    logToChat("Sistema", "Micrófono activado.");
+                } catch (e) {
+                    alert("No se pudo acceder al micrófono: " + e.message);
+                }
+            } else {
+                if (localStream) {
+                    localStream.getTracks().forEach(t => t.stop());
+                }
+                Object.values(peers).forEach(pc => pc.close());
+                peers = {};
+                inVoice = false;
+                document.getElementById('voice-btn').innerText = "Conectar Voz";
+                document.getElementById('voice-btn').className = "";
+                logToChat("Sistema", "Desconectado de la voz.");
+            }
+        }
+
+        function getOrCreatePeer(targetId) {
+            if (peers[targetId]) return peers[targetId];
+
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+            
+            if (localStream) {
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            }
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendSignal(0x08, targetId, JSON.stringify(event.candidate));
+                }
+            };
+
+            pc.ontrack = (event) => {
+                const audio = new Audio();
+                audio.srcObject = event.streams[0];
+                audio.play();
+                logToChat("Voz", `Audio recibido de ${targetId}`);
+            };
+
+            peers[targetId] = pc;
+            return pc;
+        }
+
+        async function sendSignal(opcode, targetId, payloadStr) {
+            const sig = { target: targetId, payload: payloadStr };
+            const packed = msgpack.encode(sig);
+            const packet = new Uint8Array(1 + packed.length);
+            packet[0] = opcode;
+            packet.set(packed, 1);
+            ws.send(packet);
+        }
+
+        async function handleSignaling(opcode, senderId, payloadStr) {
+            const pc = getOrCreatePeer(senderId);
+            const data = JSON.parse(payloadStr);
+
+            if (opcode === 0x06) { 
+                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp || data }));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                sendSignal(0x07, senderId, JSON.stringify(answer));
+            } else if (opcode === 0x07) { 
+                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp || data }));
+            } else if (opcode === 0x08) { 
+                await pc.addIceCandidate(new RTCIceCandidate(data));
+            }
+        }
+    </script>
+</body>
+</html>
