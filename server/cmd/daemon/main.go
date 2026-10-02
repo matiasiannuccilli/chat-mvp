@@ -301,8 +301,11 @@ func main() {
 
 	http.Handle("/", http.FileServer(http.Dir("./public")))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true, // ESTO ARREGLA EL RECHAZO DE CONEXIÓN
+		})
 		if err != nil {
+			log.Println("Error WS:", err)
 			return
 		}
 		q := r.URL.Query()

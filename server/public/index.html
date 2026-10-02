@@ -121,23 +121,34 @@
             serverId = document.getElementById('server-input').value.trim() || 'global';
             if (!userName) return;
             
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            if (audioCtx.state === 'suspended') audioCtx.resume();
+            // Try-catch para evitar que navegadores estrictos bloqueen el login
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (AudioContext) {
+                    if (!audioCtx) audioCtx = new AudioContext();
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                }
+            } catch(e) { console.warn("AudioContext no soportado o bloqueado"); }
             
             document.getElementById('f-name').innerText = userName;
             document.getElementById('f-avatar').innerText = userName.charAt(0).toUpperCase();
             document.getElementById('server-title-ui').innerText = "⚡️ " + serverId.toUpperCase();
+            
+            // MOSTRAR INTERFAZ INMEDIATAMENTE
             document.getElementById('login-overlay').style.display = 'none';
+            document.getElementById('app-main').style.display = window.innerWidth > 768 ? 'grid' : 'flex'; 
 
             ws = new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws?name=${encodeURIComponent(userName)}&server=${encodeURIComponent(serverId)}`);
             ws.binaryType = "arraybuffer";
 
+            ws.onopen = () => appendMsg("Sistema", "Conectando y sincronizando...", new Date().toLocaleTimeString());
+            ws.onclose = () => appendMsg("Sistema", "Desconectado del servidor.", new Date().toLocaleTimeString());
+
             ws.onmessage = async e => {
                 const op = new Uint8Array(e.data)[0], p = new Uint8Array(e.data).slice(1), data = unpack(p);
                 
-                if (op === 0x01) { // IDENTIDAD ASIGNADA POR SERVIDOR
+                if (op === 0x01) { // Recibe ID autorizado del servidor
                     userId = data.id;
-                    document.getElementById('app-main').style.display = window.innerWidth > 768 ? 'grid' : 'flex';
                     ws.send(new Uint8Array([0x04, ...pack({c:"general", l:50})]));
                 } else if (op === 0x02) {
                     appendMsg(onlineUsers[data.u] || data.u, data.m, new Date(data.t).toLocaleTimeString());
