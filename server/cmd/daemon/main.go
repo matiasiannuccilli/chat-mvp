@@ -154,7 +154,7 @@ func (c *Client) readPump() {
 				resp, _ := msgpack.Marshal(map[string]any{"c": req.ChannelID, "msgs": history})
 				c.send <- append([]byte{0x05}, resp...)
 			}
-		case 0x09: // <-- NUEVO: Broadcast de Presencia de Voz para el árbol de usuarios
+		case 0x09:
 			c.hub.broadcast <- data
 		case 0x06, 0x07, 0x08:
 			var sig SignalPacket
@@ -168,6 +168,8 @@ func (c *Client) readPump() {
 				c.hub.mu.RUnlock()
 			}
 		}
+	}
+}
 
 func (c *Client) writePump() {
 	for message := range c.send {
@@ -224,7 +226,6 @@ func main() {
 	hub := newHub(db)
 	go hub.run()
 
-	// Servir archivos estáticos del frontend (index.html)
 	fs := http.FileServer(http.Dir("./public"))
 	http.Handle("/", fs)
 
