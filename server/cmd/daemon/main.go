@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	_ "github.com/mattn/go-sqlite3"
@@ -39,6 +43,8 @@ type Client struct {
 	conn   *websocket.Conn
 	hub    *Hub
 	send   chan []byte
+	done   chan struct{}
+	once   sync.Once
 }
 
 type Hub struct {
@@ -49,9 +55,8 @@ type Hub struct {
 	unregister  chan *Client
 	dbQueue     chan TextMsg
 	db          *sql.DB
-	mu          sync.RWMutex
 	voiceUsers  map[string]bool
-	onlineUsers map[string]string // ID -> Name
+	onlineUsers map[string]string
 }
 
 var (
@@ -81,6 +86,21 @@ func getHub(serverID string, db *sql.DB) *Hub {
 	return h
 }
 
+func (c *Client) kick() {
+	c.once.Do(func() {
+		close(c.done)
+		c.conn.Close(websocket.StatusPolicyViolation, "slow client")
+	})
+}
+
+func (c *Client) trySend(m []byte) {
+	select {
+	case c.send <- m:
+	default:
+		c.kick()
+	}
+}
+
 func (h *Hub) run() {
 	go func() {
 		stmt, _ := h.db.Prepare("INSERT INTO messages(server_id, channel_id, sender, content, created_at) VALUES(?, ?, ?, ?, ?)")
@@ -92,63 +112,41 @@ func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.mu.Lock()
 			h.clients[client.id] = client
 			h.onlineUsers[client.id] = client.name
-			h.mu.Unlock()
 			joinMsg, _ := json.Marshal(Presence{User: client.id, Name: client.name, Action: "join"})
-			h.broadcast <- append([]byte{0x0B}, joinMsg...)
+			pkt := append([]byte{0x0B}, joinMsg...)
+			for _, c := range h.clients {
+				c.trySend(pkt)
+			}
 
 		case client := <-h.unregister:
-			h.mu.Lock()
 			if _, ok := h.clients[client.id]; ok {
 				delete(h.clients, client.id)
 				delete(h.onlineUsers, client.id)
+				leaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
+				pkt := append([]byte{0x0B}, leaveMsg...)
+
+				if h.voiceUsers[client.id] {
+					delete(h.voiceUsers, client.id)
+					vLeaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
+					vPkt := append([]byte{0x09}, vLeaveMsg...)
+					for _, c := range h.clients {
+						c.trySend(vPkt)
+					}
+				}
+				for _, c := range h.clients {
+					c.trySend(pkt)
+				}
 				close(client.send)
-			}
-			h.mu.Unlock()
-			leaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
-			h.broadcast <- append([]byte{0x0B}, leaveMsg...)
-			if h.voiceUsers[client.id] {
-				h.mu.Lock()
-				delete(h.voiceUsers, client.id)
-				h.mu.Unlock()
-				vLeaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
-				h.broadcast <- append([]byte{0x09}, vLeaveMsg...)
 			}
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
 			for _, client := range h.clients {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(h.clients, client.id)
-				}
+				client.trySend(message)
 			}
-			h.mu.RUnlock()
 		}
 	}
-}
-
-func (h *Hub) getRecentMessages(channelID int) ([]TextMsg, error) {
-	rows, err := h.db.Query(`SELECT sender, content, created_at FROM messages WHERE server_id = ? AND channel_id = 'general' ORDER BY id DESC LIMIT 50`, h.id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var list []TextMsg
-	for rows.Next() {
-		var m TextMsg
-		if err := rows.Scan(&m.Sender, &m.Content, &m.Timestamp); err == nil {
-			list = append(list, m)
-		}
-	}
-	for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
-		list[i], list[j] = list[j], list[i]
-	}
-	return list, nil
 }
 
 func (c *Client) readPump() {
@@ -172,60 +170,120 @@ func (c *Client) readPump() {
 		switch opcode {
 		case 0x02:
 			var msg TextMsg
-			if err := json.Unmarshal(payload, &msg); err == nil {
-				msg.ServerID = c.server
-				c.hub.broadcast <- data
-				c.hub.dbQueue <- msg
+			if err := json.Unmarshal(payload, &msg); err != nil {
+				continue
 			}
-		case 0x04:
-			history, _ := c.hub.getRecentMessages(50)
-			resp, _ := json.Marshal(map[string]any{"c": "general", "msgs": history})
-			c.send <- append([]byte{0x05}, resp...)
+			msg.Content = strings.TrimSpace(msg.Content)
+			if msg.Content == "" || len(msg.Content) > 2000 {
+				continue
+			}
+			msg.ServerID, msg.Sender, msg.Timestamp = c.server, c.id, time.Now().UnixMilli()
+			out, _ := json.Marshal(msg)
+			c.hub.broadcast <- append([]byte{0x02}, out...)
+			c.hub.dbQueue <- msg
 
-			c.hub.mu.RLock()
+		case 0x04:
+			rows, _ := c.hub.db.Query(`SELECT sender, content, created_at FROM messages WHERE server_id = ? ORDER BY id DESC LIMIT 50`, c.server)
+			var list []TextMsg
+			if rows != nil {
+				for rows.Next() {
+					var m TextMsg
+					if rows.Scan(&m.Sender, &m.Content, &m.Timestamp) == nil {
+						list = append(list, m)
+					}
+				}
+				rows.Close()
+				for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
+					list[i], list[j] = list[j], list[i]
+				}
+			}
+			resp, _ := json.Marshal(map[string]any{"c": "general", "msgs": list})
+			c.trySend(append([]byte{0x05}, resp...))
+
 			var vUsers []string
 			for u := range c.hub.voiceUsers {
 				vUsers = append(vUsers, u)
 			}
 			syncResp, _ := json.Marshal(map[string]any{"voice": vUsers, "online": c.hub.onlineUsers})
-			c.hub.mu.RUnlock()
-			c.send <- append([]byte{0x0A}, syncResp...)
+			c.trySend(append([]byte{0x0A}, syncResp...))
 
 		case 0x09:
 			var vp Presence
 			if err := json.Unmarshal(payload, &vp); err == nil {
-				c.hub.mu.Lock()
+				vp.User = c.id
+				out, _ := json.Marshal(vp)
+				pkt := append([]byte{0x09}, out...)
 				if vp.Action == "join" {
-					c.hub.voiceUsers[vp.User] = true
+					c.hub.register <- &Client{id: "voice_join"} // Señal interna
+					c.hub.voiceUsers[c.id] = true
 				} else {
-					delete(c.hub.voiceUsers, vp.User)
+					c.hub.register <- &Client{id: "voice_leave"}
+					delete(c.hub.voiceUsers, c.id)
 				}
-				c.hub.mu.Unlock()
-				c.hub.broadcast <- data
+				c.hub.broadcast <- pkt
 			}
+
+		case 0x0C:
+			var sp struct {
+				U string `json:"u"`
+				S bool   `json:"s"`
+			}
+			if json.Unmarshal(payload, &sp) == nil {
+				sp.U = c.id
+				out, _ := json.Marshal(sp)
+				c.hub.broadcast <- append([]byte{0x0C}, out...)
+			}
+
 		case 0x06, 0x07, 0x08:
 			var sig SignalPacket
-			if err := json.Unmarshal(payload, &sig); err == nil {
+			if json.Unmarshal(payload, &sig) == nil {
 				sig.Sender = c.id
 				packed, _ := json.Marshal(sig)
-				c.hub.mu.RLock()
 				if target, ok := c.hub.clients[sig.Target]; ok {
-					target.send <- append([]byte{opcode}, packed...)
+					target.trySend(append([]byte{opcode}, packed...))
 				}
-				c.hub.mu.RUnlock()
 			}
 		}
 	}
 }
 
 func (c *Client) writePump() {
-	for message := range c.send {
-		c.conn.Write(context.Background(), websocket.MessageBinary, message)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case m, ok := <-c.send:
+			if !ok {
+				c.conn.Close(websocket.StatusNormalClosure, "")
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := c.conn.Write(ctx, websocket.MessageBinary, m)
+			cancel()
+			if err != nil {
+				c.kick()
+				return
+			}
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := c.conn.Ping(ctx)
+			cancel()
+			if err != nil {
+				c.kick()
+				return
+			}
+		case <-c.done:
+			return
+		}
 	}
 }
 
 func initDB(path string) *sql.DB {
-	db, _ := sql.Open("sqlite3", path+"?_journal_mode=WAL")
+	os.MkdirAll("./data", 0o755)
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL")
+	if err != nil {
+		log.Fatal(err)
+	}
 	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		server_id TEXT NOT NULL,
@@ -243,7 +301,7 @@ func main() {
 
 	http.Handle("/", http.FileServer(http.Dir("./public")))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
 		if err != nil {
 			return
 		}
@@ -252,19 +310,31 @@ func main() {
 		if serverID == "" {
 			serverID = "global"
 		}
+		name := q.Get("name")
+		if name == "" || len(name) > 32 {
+			conn.Close(websocket.StatusPolicyViolation, "invalid name")
+			return
+		}
+
 		client := &Client{
-			id:     q.Get("user"),
-			name:   q.Get("name"),
+			id:     fmt.Sprintf("u_%d", time.Now().UnixNano()),
+			name:   name,
 			server: serverID,
 			conn:   conn,
 			hub:    getHub(serverID, db),
-			send:   make(chan []byte, 64),
+			send:   make(chan []byte, 256),
+			done:   make(chan struct{}),
 		}
+
+		welcome, _ := json.Marshal(map[string]string{"id": client.id, "name": client.name})
+		client.trySend(append([]byte{0x01}, welcome...))
+
 		client.hub.register <- client
 		go client.writePump()
 		client.readPump()
 	})
 
 	log.Println("Servidor Go Multi-Sala escuchando en :8080...")
-	http.ListenAndServe(":8080", nil)
+	server := &http.Server{Addr: ":8080", ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(server.ListenAndServe())
 }
