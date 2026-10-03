@@ -2,101 +2,268 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type TextMsg struct {
-	ServerID  string `json:"s"`
-	ChannelID string `json:"c"`
-	Sender    string `json:"u"`
-	Content   string `json:"m"`
-	Timestamp int64  `json:"t"`
+// Opcodes (1 byte) + JSON.
+// 0x01 hello/welcome  0x02 chat  0x03 crear canal  0x05 historial  0x06-08 señalización WebRTC
+// 0x09 voz (entrar/salir)  0x0A estado inicial  0x0B presencia  0x0C hablando  0x0D susurro
+// 0x0E lista de canales  0x0F error
+
+const (
+	maxChannels = 8
+	maxRooms    = 50
+	maxName     = 24
+)
+
+type Channel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
-type SignalPacket struct {
+type Presence struct {
+	User   string `json:"user"`
+	Name   string `json:"name,omitempty"`
+	Action string `json:"action"`
+	Ch     string `json:"ch,omitempty"`
+}
+
+type Signal struct {
 	Target  string `json:"target"`
 	Sender  string `json:"sender,omitempty"`
 	Payload string `json:"payload"`
 }
 
-type Presence struct {
-	User   string `json:"user"`
-	Name   string `json:"name"`
-	Action string `json:"action"`
+var cfg struct {
+	adminKey, baseURL string
+	maxUsers          int
+	origins           []string
+	ice               []map[string]any
 }
+
+var db *sql.DB
+
+// ---------- utilidades ----------
+
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+func randBytes(n int) []byte {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatal(err)
+	}
+	return b
+}
+func randID(n int) string { return hex.EncodeToString(randBytes(n)) }
+func randToken() string   { return base64.RawURLEncoding.EncodeToString(randBytes(16)) }
+func hashTok(t string) string {
+	h := sha256.Sum256([]byte(t))
+	return hex.EncodeToString(h[:])
+}
+
+func frame(op byte, v any) []byte {
+	b, _ := json.Marshal(v)
+	out := make([]byte, 1+len(b))
+	out[0] = op
+	copy(out[1:], b)
+	return out
+}
+
+func cleanName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '<' || r == '>' {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > maxName {
+		s = string(r[:maxName])
+	}
+	return strings.TrimSpace(s)
+}
+
+type bucket struct {
+	tokens, rate, burst float64
+	last                time.Time
+}
+
+func newBucket(rate, burst float64) *bucket { return &bucket{burst, rate, burst, time.Now()} }
+func (b *bucket) allow() bool {
+	now := time.Now()
+	b.tokens += now.Sub(b.last).Seconds() * b.rate
+	if b.tokens > b.burst {
+		b.tokens = b.burst
+	}
+	b.last = now
+	if b.tokens >= 1 {
+		b.tokens--
+		return true
+	}
+	return false
+}
+
+// ---------- base de datos ----------
+
+type dbMsg struct {
+	room, sender, content string
+	ts                    int64
+}
+
+var dbQueue = make(chan dbMsg, 2048)
+
+func initDB(path string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Fatal(err)
+	}
+	var err error
+	db, err = sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, channel_id TEXT NOT NULL, sender TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(server_id, id)`,
+		`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS channels (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, name TEXT NOT NULL)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+func dbWriter() {
+	stmt, err := db.Prepare(`INSERT INTO messages(server_id, channel_id, sender, content, created_at) VALUES(?, 'general', ?, ?, ?)`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for m := range dbQueue {
+		if _, err := stmt.Exec(m.room, m.sender, m.content, m.ts); err != nil {
+			log.Println("db:", err)
+		}
+	}
+}
+
+type Room struct {
+	ID, Name, TokenHash string
+	Expires             int64
+}
+
+func loadRoom(id string) (Room, bool) {
+	var r Room
+	err := db.QueryRow(`SELECT id, name, token_hash, expires_at FROM rooms WHERE id = ?`, id).Scan(&r.ID, &r.Name, &r.TokenHash, &r.Expires)
+	return r, err == nil
+}
+
+func createRoom(name string, hours int) (string, string, error) {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM rooms`).Scan(&n); err != nil {
+		return "", "", err
+	}
+	if n >= maxRooms {
+		return "", "", errors.New("límite de servidores alcanzado")
+	}
+	id, tok := randID(6), randToken()
+	var exp int64
+	if hours > 0 {
+		exp = time.Now().Add(time.Duration(hours) * time.Hour).Unix()
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO rooms(id, name, token_hash, created_at, expires_at) VALUES(?,?,?,?,?)`, id, name, hashTok(tok), time.Now().Unix(), exp); err != nil {
+		return "", "", err
+	}
+	if _, err := tx.Exec(`INSERT INTO channels(id, room_id, name) VALUES(?,?,?)`, randID(4), id, "General"); err != nil {
+		return "", "", err
+	}
+	return id, tok, tx.Commit()
+}
+
+func loadChannels(room string) []Channel {
+	out := []Channel{}
+	rows, err := db.Query(`SELECT id, name FROM channels WHERE room_id = ? ORDER BY rowid`, room)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c Channel
+		if rows.Scan(&c.ID, &c.Name) == nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func history(room string) []map[string]any {
+	out := []map[string]any{}
+	rows, err := db.Query(`SELECT sender, content, created_at FROM messages WHERE server_id = ? ORDER BY id DESC LIMIT 50`, room)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n, m string
+		var t int64
+		if rows.Scan(&n, &m, &t) == nil {
+			out = append(out, map[string]any{"n": n, "m": m, "t": t})
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// ---------- hub y clientes ----------
 
 type Client struct {
-	id     string
-	name   string
-	server string
-	conn   *websocket.Conn
-	hub    *Hub
-	send   chan []byte
-	done   chan struct{}
-	once   sync.Once
+	id, name, resume string
+	conn             *websocket.Conn
+	hub              *Hub
+	send             chan []byte
+	done             chan struct{}
+	once             sync.Once
 }
 
-type Hub struct {
-	id          string
-	clients     map[string]*Client
-	broadcast   chan []byte
-	register    chan *Client
-	unregister  chan *Client
-	dbQueue     chan TextMsg
-	db          *sql.DB
-	mu          sync.RWMutex
-	voiceUsers  map[string]bool
-	onlineUsers map[string]string
-}
-var (
-	managerMu sync.RWMutex
-	hubs      = make(map[string]*Hub)
-)
-
-func getHub(serverID string, db *sql.DB) *Hub {
-	managerMu.Lock()
-	defer managerMu.Unlock()
-	if h, ok := hubs[serverID]; ok {
-		return h
-	}
-	h := &Hub{
-		id:          serverID,
-		clients:     make(map[string]*Client),
-		broadcast:   make(chan []byte, 256),
-		register:    make(chan *Client),
-		unregister:  make(chan *Client),
-		dbQueue:     make(chan TextMsg, 1024),
-		db:          db,
-		voiceUsers:  make(map[string]bool),
-		onlineUsers: make(map[string]string),
-	}
-	hubs[serverID] = h
-	go h.run()
-	return h
-}
-
+// kick cierra la conexión una sola vez. Nunca se cierra c.send (evita "send on closed channel").
 func (c *Client) kick() {
 	c.once.Do(func() {
-		if c.done != nil {
-			close(c.done)
-		}
-		if c.conn != nil {
-			c.conn.Close(websocket.StatusPolicyViolation, "slow client")
-		}
+		close(c.done)
+		c.conn.CloseNow()
 	})
 }
 
+// trySend nunca bloquea: si la cola está llena, el cliente es lento y se expulsa.
 func (c *Client) trySend(m []byte) {
 	select {
 	case c.send <- m:
@@ -105,173 +272,276 @@ func (c *Client) trySend(m []byte) {
 	}
 }
 
-func (h *Hub) run() {
-	go func() {
-		stmt, _ := h.db.Prepare("INSERT INTO messages(server_id, channel_id, sender, content, created_at) VALUES(?, ?, ?, ?, ?)")
-		for msg := range h.dbQueue {
-			stmt.Exec(msg.ServerID, msg.ChannelID, msg.Sender, msg.Content, msg.Timestamp)
-		}
-	}()
+type Hub struct {
+	id, name string
+	mu       sync.Mutex
+	clients  map[string]*Client
+	voice    map[string]string          // userID -> channelID
+	whisper  map[string]map[string]bool // emisor -> destinatarios
+	channels []Channel
+}
 
-	for {
-		select {
-		case client := <-h.register:
-			h.clients[client.id] = client
-			h.onlineUsers[client.id] = client.name
-			joinMsg, _ := json.Marshal(Presence{User: client.id, Name: client.name, Action: "join"})
-			pkt := append([]byte{0x0B}, joinMsg...)
-			for _, c := range h.clients {
-				c.trySend(pkt)
-			}
+var (
+	hubsMu sync.Mutex
+	hubs   = map[string]*Hub{}
+)
 
-		case client := <-h.unregister:
-			if _, ok := h.clients[client.id]; ok {
-				delete(h.clients, client.id)
-				delete(h.onlineUsers, client.id)
-				leaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
-				pkt := append([]byte{0x0B}, leaveMsg...)
+func getHub(r Room) *Hub {
+	hubsMu.Lock()
+	defer hubsMu.Unlock()
+	if h, ok := hubs[r.ID]; ok {
+		return h
+	}
+	h := &Hub{id: r.ID, name: r.Name, clients: map[string]*Client{}, voice: map[string]string{}, whisper: map[string]map[string]bool{}, channels: loadChannels(r.ID)}
+	hubs[r.ID] = h
+	return h
+}
 
-				if h.voiceUsers[client.id] {
-					delete(h.voiceUsers, client.id)
-					vLeaveMsg, _ := json.Marshal(Presence{User: client.id, Action: "leave"})
-					vPkt := append([]byte{0x09}, vLeaveMsg...)
-					for _, c := range h.clients {
-						c.trySend(vPkt)
-					}
-				}
-				for _, c := range h.clients {
-					c.trySend(pkt)
-				}
-				close(client.send)
-			}
+// Los métodos con sufijo "L" requieren h.mu tomado.
+func (h *Hub) bcastL(m []byte) {
+	for _, c := range h.clients {
+		c.trySend(m)
+	}
+}
+func (h *Hub) broadcast(m []byte) { h.mu.Lock(); h.bcastL(m); h.mu.Unlock() }
 
-		case message := <-h.broadcast:
-			for _, client := range h.clients {
-				client.trySend(message)
+func (h *Hub) uniqueNameL(base string) string {
+	n := base
+	for i := 2; ; i++ {
+		taken := false
+		for _, o := range h.clients {
+			if strings.EqualFold(o.name, n) {
+				taken = true
+				break
 			}
 		}
+		if !taken {
+			return n
+		}
+		suf := " #" + strconv.Itoa(i)
+		r := []rune(base)
+		if len(r)+len(suf) > maxName {
+			r = r[:maxName-len(suf)]
+		}
+		n = string(r) + suf
 	}
 }
 
-func (c *Client) readPump() {
-	defer func() {
-		c.hub.unregister <- c
-		c.conn.Close(websocket.StatusNormalClosure, "")
-	}()
+func (h *Hub) leaveVoiceL(id string) {
+	delete(h.whisper, id)
+	if _, ok := h.voice[id]; ok {
+		delete(h.voice, id)
+		h.bcastL(frame(0x09, Presence{User: id, Action: "leave"}))
+	}
+}
 
+func (h *Hub) add(c *Client, name, resume string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var old *Client
+	if resume != "" {
+		for _, o := range h.clients {
+			if subtle.ConstantTimeCompare([]byte(o.resume), []byte(resume)) == 1 {
+				old = o
+				break
+			}
+		}
+	}
+	if old == nil && len(h.clients) >= cfg.maxUsers {
+		return false
+	}
+	if old != nil { // reconexión: conserva identidad, reemplaza la conexión vieja
+		c.id, c.resume = old.id, old.resume
+		delete(h.clients, old.id)
+		h.leaveVoiceL(old.id)
+		old.kick()
+	}
+	c.name = h.uniqueNameL(name)
+	h.clients[c.id] = c
+	return true
+}
+
+func (h *Hub) remove(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.clients[c.id] != c {
+		return
+	}
+	delete(h.clients, c.id)
+	h.leaveVoiceL(c.id)
+	h.bcastL(frame(0x0B, Presence{User: c.id, Action: "leave"}))
+}
+
+func (h *Hub) setWhisper(c *Client, on bool, users, chans []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.voice[c.id]; !ok {
+		return
+	}
+	to := map[string]bool{}
+	if on {
+		if len(users) > 20 {
+			users = users[:20]
+		}
+		if len(chans) > maxChannels {
+			chans = chans[:maxChannels]
+		}
+		for _, u := range users {
+			if _, v := h.voice[u]; v && u != c.id {
+				to[u] = true
+			}
+		}
+		for _, ch := range chans {
+			for u, uc := range h.voice {
+				if uc == ch && u != c.id {
+					to[u] = true
+				}
+			}
+		}
+	}
+	for u := range h.whisper[c.id] {
+		if !to[u] {
+			if o := h.clients[u]; o != nil {
+				o.trySend(frame(0x0D, map[string]any{"from": c.id, "on": false}))
+			}
+		}
+	}
+	list := make([]string, 0, len(to))
+	for u := range to {
+		list = append(list, u)
+		if o := h.clients[u]; o != nil {
+			o.trySend(frame(0x0D, map[string]any{"from": c.id, "on": true}))
+		}
+	}
+	if on {
+		h.whisper[c.id] = to
+	} else {
+		delete(h.whisper, c.id)
+	}
+	c.trySend(frame(0x0D, map[string]any{"from": c.id, "on": on, "to": list}))
+}
+
+func (c *Client) readPump() {
+	h := c.hub
+	defer func() { h.remove(c); c.kick() }()
+	gen, chat := newBucket(200, 400), newBucket(3, 6)
 	for {
 		_, data, err := c.conn.Read(context.Background())
 		if err != nil {
-			break
+			return
 		}
-		if len(data) == 0 {
+		if len(data) < 1 {
 			continue
 		}
-
-		opcode := data[0]
-		payload := data[1:]
-
-		switch opcode {
+		if !gen.allow() {
+			return // flood: se corta la conexión
+		}
+		op, p := data[0], data[1:]
+		switch op {
 		case 0x02:
-			var msg TextMsg
-			if err := json.Unmarshal(payload, &msg); err != nil {
+			var in struct{ M string }
+			if !chat.allow() || json.Unmarshal(p, &in) != nil {
 				continue
 			}
-			msg.Content = strings.TrimSpace(msg.Content)
-			if msg.Content == "" || len(msg.Content) > 2000 {
+			m := strings.TrimSpace(in.M)
+			if m == "" || utf8.RuneCountInString(m) > 1000 {
 				continue
 			}
-			msg.ServerID, msg.Sender, msg.Timestamp = c.server, c.id, time.Now().UnixMilli()
-			out, _ := json.Marshal(msg)
-			c.hub.broadcast <- append([]byte{0x02}, out...)
-			c.hub.dbQueue <- msg
-
-		case 0x04:
-			rows, _ := c.hub.db.Query(`SELECT sender, content, created_at FROM messages WHERE server_id = ? ORDER BY id DESC LIMIT 50`, c.server)
-			var list []TextMsg
-			if rows != nil {
-				for rows.Next() {
-					var m TextMsg
-					if rows.Scan(&m.Sender, &m.Content, &m.Timestamp) == nil {
-						list = append(list, m)
+			ts := time.Now().UnixMilli()
+			h.broadcast(frame(0x02, map[string]any{"u": c.id, "n": c.name, "m": m, "t": ts}))
+			select {
+			case dbQueue <- dbMsg{h.id, c.name, m, ts}:
+			default:
+				log.Println("cola de db llena, mensaje no persistido")
+			}
+		case 0x03:
+			var in struct{ Name string }
+			name := ""
+			if json.Unmarshal(p, &in) == nil {
+				name = cleanName(in.Name)
+			}
+			if name == "" || !chat.allow() {
+				continue
+			}
+			h.mu.Lock()
+			if len(h.channels) >= maxChannels {
+				c.trySend(frame(0x0F, map[string]string{"msg": "Límite de salas alcanzado"}))
+			} else {
+				ch := Channel{ID: randID(4), Name: name}
+				if _, err := db.Exec(`INSERT INTO channels(id, room_id, name) VALUES(?,?,?)`, ch.ID, h.id, ch.Name); err != nil {
+					log.Println("db:", err)
+				} else {
+					h.channels = append(h.channels, ch)
+					h.bcastL(frame(0x0E, map[string]any{"channels": h.channels}))
+				}
+			}
+			h.mu.Unlock()
+		case 0x09:
+			var in struct{ Action, Ch string }
+			if json.Unmarshal(p, &in) != nil {
+				continue
+			}
+			h.mu.Lock()
+			if in.Action == "join" {
+				for _, ch := range h.channels {
+					if ch.ID == in.Ch {
+						h.voice[c.id] = ch.ID
+						h.bcastL(frame(0x09, Presence{User: c.id, Action: "join", Ch: ch.ID}))
+						break
 					}
 				}
-				rows.Close()
-				for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
-					list[i], list[j] = list[j], list[i]
-				}
+			} else {
+				h.leaveVoiceL(c.id)
 			}
-			resp, _ := json.Marshal(map[string]any{"c": "general", "msgs": list})
-			c.trySend(append([]byte{0x05}, resp...))
-
-			var vUsers []string
-			for u := range c.hub.voiceUsers {
-				vUsers = append(vUsers, u)
-			}
-			syncResp, _ := json.Marshal(map[string]any{"voice": vUsers, "online": c.hub.onlineUsers})
-			c.trySend(append([]byte{0x0A}, syncResp...))
-
-		case 0x09:
-			var vp Presence
-			if err := json.Unmarshal(payload, &vp); err == nil {
-				vp.User = c.id
-				out, _ := json.Marshal(vp)
-				pkt := append([]byte{0x09}, out...)
-
-				c.hub.mu.Lock()
-				if vp.Action == "join" {
-					c.hub.voiceUsers[c.id] = true
-				} else {
-					delete(c.hub.voiceUsers, c.id)
-				}
-				c.hub.mu.Unlock()
-
-				c.hub.broadcast <- pkt
-			}
-
-		case 0x0C:
-			var sp struct {
-				U string `json:"u"`
-				S bool   `json:"s"`
-			}
-			if json.Unmarshal(payload, &sp) == nil {
-				sp.U = c.id
-				out, _ := json.Marshal(sp)
-				c.hub.broadcast <- append([]byte{0x0C}, out...)
-			}
-
+			h.mu.Unlock()
 		case 0x06, 0x07, 0x08:
-			var sig SignalPacket
-			if json.Unmarshal(payload, &sig) == nil {
+			var sig Signal
+			if json.Unmarshal(p, &sig) != nil {
+				continue
+			}
+			h.mu.Lock()
+			_, mine := h.voice[c.id]
+			_, theirs := h.voice[sig.Target]
+			t := h.clients[sig.Target]
+			h.mu.Unlock()
+			if mine && theirs && t != nil && t != c {
 				sig.Sender = c.id
-				packed, _ := json.Marshal(sig)
-				if target, ok := c.hub.clients[sig.Target]; ok {
-					target.trySend(append([]byte{opcode}, packed...))
-				}
+				t.trySend(frame(op, sig))
+			}
+		case 0x0C:
+			var in struct{ S bool }
+			h.mu.Lock()
+			if _, ok := h.voice[c.id]; ok && json.Unmarshal(p, &in) == nil {
+				h.bcastL(frame(0x0C, map[string]any{"u": c.id, "s": in.S}))
+			}
+			h.mu.Unlock()
+		case 0x0D:
+			var in struct {
+				On           bool
+				Users, Chans []string
+			}
+			if json.Unmarshal(p, &in) == nil {
+				h.setWhisper(c, in.On, in.Users, in.Chans)
 			}
 		}
 	}
 }
 
 func (c *Client) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	t := time.NewTicker(25 * time.Second)
+	defer t.Stop()
 	for {
 		select {
-		case m, ok := <-c.send:
-			if !ok {
-				c.conn.Close(websocket.StatusNormalClosure, "")
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		case m := <-c.send:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			err := c.conn.Write(ctx, websocket.MessageBinary, m)
 			cancel()
 			if err != nil {
 				c.kick()
 				return
 			}
-		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			err := c.conn.Ping(ctx)
 			cancel()
 			if err != nil {
@@ -284,66 +554,150 @@ func (c *Client) writePump() {
 	}
 }
 
-func initDB(path string) *sql.DB {
-	os.MkdirAll("./data", 0o755)
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL")
+// ---------- HTTP ----------
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: cfg.origins})
 	if err != nil {
-		log.Fatal(err)
+		return
 	}
-	db.Exec(`CREATE TABLE IF NOT EXISTS messages (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		server_id TEXT NOT NULL,
-		channel_id TEXT NOT NULL,
-		sender TEXT NOT NULL,
-		content TEXT NOT NULL,
-		created_at INTEGER NOT NULL
-	);`)
-	return db
+	conn.SetReadLimit(64 << 10)
+	fail := func(msg string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Write(ctx, websocket.MessageBinary, frame(0x0F, map[string]string{"msg": msg}))
+		conn.Close(websocket.StatusPolicyViolation, "denied")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, data, err := conn.Read(ctx)
+	cancel()
+	if err != nil || len(data) < 2 || data[0] != 0x01 {
+		conn.CloseNow()
+		return
+	}
+	var in struct{ Room, Token, Name, Resume string }
+	if json.Unmarshal(data[1:], &in) != nil {
+		conn.CloseNow()
+		return
+	}
+	room, ok := loadRoom(in.Room)
+	if !ok || subtle.ConstantTimeCompare([]byte(hashTok(in.Token)), []byte(room.TokenHash)) != 1 || (room.Expires > 0 && time.Now().Unix() > room.Expires) {
+		fail("Link de invitación inválido o vencido")
+		return
+	}
+	name := cleanName(in.Name)
+	if name == "" {
+		fail("Elegí un nombre")
+		return
+	}
+	h := getHub(room)
+	c := &Client{id: randID(8), resume: randID(16), conn: conn, hub: h, send: make(chan []byte, 128), done: make(chan struct{})}
+	if !h.add(c, name, in.Resume) {
+		fail("La sala está llena")
+		return
+	}
+	go c.writePump()
+	c.trySend(frame(0x01, map[string]any{"id": c.id, "name": c.name, "resume": c.resume, "room": h.name, "ice": cfg.ice}))
+	h.mu.Lock()
+	online := map[string]string{}
+	for id, o := range h.clients {
+		online[id] = o.name
+	}
+	c.trySend(frame(0x0A, map[string]any{"online": online, "voice": h.voice, "channels": h.channels}))
+	h.bcastL(frame(0x0B, Presence{User: c.id, Name: c.name, Action: "join"}))
+	h.mu.Unlock()
+	c.trySend(frame(0x05, map[string]any{"msgs": history(h.id)}))
+	c.readPump()
+}
+
+var (
+	apiMu  sync.Mutex
+	apiLim = newBucket(0.2, 10)
+)
+
+func apiRooms(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	apiMu.Lock()
+	ok := apiLim.allow()
+	apiMu.Unlock()
+	if !ok {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(cfg.adminKey)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var in struct {
+		Name  string
+		Hours int
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in) != nil || cleanName(in.Name) == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, tok, err := createRoom(cleanName(in.Name), in.Hours)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"id": id, "token": tok})
+}
+
+func secure(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; media-src 'self' blob:; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
-	db := initDB("./data/chat_v2.db")
+	cfg.adminKey = env("ADMIN_KEY", "")
+	if cfg.adminKey == "" {
+		cfg.adminKey = randToken()
+		log.Printf("ADMIN_KEY no definida; se generó una temporal: %s", cfg.adminKey)
+	}
+	cfg.baseURL = strings.TrimRight(env("BASE_URL", "http://localhost:8080"), "/")
+	cfg.maxUsers, _ = strconv.Atoi(env("MAX_USERS", "10"))
+	if cfg.maxUsers < 2 {
+		cfg.maxUsers = 10
+	}
+	for _, o := range strings.Split(env("ALLOWED_ORIGINS", ""), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			cfg.origins = append(cfg.origins, o)
+		}
+	}
+	cfg.ice = []map[string]any{{"urls": []string{"stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"}}}
+	if t := env("TURN_URLS", ""); t != "" { // ej: turn:tu.dominio:3478?transport=udp,turns:tu.dominio:443?transport=tcp
+		cfg.ice = append(cfg.ice, map[string]any{"urls": strings.Split(t, ","), "username": env("TURN_USER", ""), "credential": env("TURN_PASS", "")})
+	}
+
+	initDB(env("DB_PATH", "./data/chat_v3.db"))
 	defer db.Close()
+	go dbWriter()
 
-	http.Handle("/", http.FileServer(http.Dir("./public")))
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // ESTO ARREGLA EL RECHAZO DE CONEXIÓN
-		})
+	var n int
+	if db.QueryRow(`SELECT COUNT(*) FROM rooms`).Scan(&n) == nil && n == 0 {
+		id, tok, err := createRoom("General", 0)
 		if err != nil {
-			log.Println("Error WS:", err)
-			return
+			log.Fatal(err)
 		}
-		q := r.URL.Query()
-		serverID := q.Get("server")
-		if serverID == "" {
-			serverID = "global"
-		}
-		name := q.Get("name")
-		if name == "" || len(name) > 32 {
-			conn.Close(websocket.StatusPolicyViolation, "invalid name")
-			return
-		}
+		log.Printf("Primer servidor creado. Link de invitación: %s/?r=%s#%s", cfg.baseURL, id, tok)
+	}
 
-		client := &Client{
-			id:     fmt.Sprintf("u_%d", time.Now().UnixNano()),
-			name:   name,
-			server: serverID,
-			conn:   conn,
-			hub:    getHub(serverID, db),
-			send:   make(chan []byte, 256),
-			done:   make(chan struct{}),
-		}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wsHandler)
+	mux.HandleFunc("/api/rooms", apiRooms)
+	mux.Handle("/", http.FileServer(http.Dir("./public")))
 
-		welcome, _ := json.Marshal(map[string]string{"id": client.id, "name": client.name})
-		client.trySend(append([]byte{0x01}, welcome...))
-
-		client.hub.register <- client
-		go client.writePump()
-		client.readPump()
-	})
-
-	log.Println("Servidor Go Multi-Sala escuchando en :8080...")
-	server := &http.Server{Addr: ":8080", ReadHeaderTimeout: 10 * time.Second}
-	log.Fatal(server.ListenAndServe())
+	srv := &http.Server{Addr: env("ADDR", ":8080"), Handler: secure(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+	log.Println("Servidor escuchando en", srv.Addr)
+	log.Fatal(srv.ListenAndServe())
 }
