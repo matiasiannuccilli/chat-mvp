@@ -64,7 +64,7 @@ body{background:var(--bg);color:var(--tx);height:100vh;overflow:hidden;display:f
 <div id="login-err" class="err"></div>
 <button class="main" onclick="startApp()">Conectar</button>
 <a class="lnk" onclick="$('create-box').style.display='block'">Crear un servidor nuevo</a>
-<div id="create-box" style="display:none;margin-top:10px"><input id="new-name" placeholder="Nombre del servidor" maxlength="24"><input id="admin-key" type="password" placeholder="Clave de admin"><button class="main" onclick="createRoom()">Crear</button></div>
+<div id="create-box" style="display:none;margin-top:10px"><input id="new-name" placeholder="Nombre del servidor" maxlength="24"><button class="main" onclick="createRoom()">Crear</button></div>
 </div></div>
 
 <div class="app" id="app" style="display:none">
@@ -119,8 +119,8 @@ function startApp(){
 }
 async function createRoom(){
   const name=$('new-name').value.trim();if(!name)return err('Poné un nombre al servidor');
-  try{const r=await fetch('/api/rooms',{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Key':$('admin-key').value},body:JSON.stringify({name,hours:0})});
-    if(!r.ok)return err(r.status===401?'Clave de admin incorrecta':r.status===429?'Demasiados intentos, esperá un momento':'No se pudo crear el servidor');
+  try{const r=await fetch('/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,hours:0})});
+    if(!r.ok)return err(r.status===409?'Ya existe un servidor con ese nombre':r.status===429?'Creaste varios servidores seguidos, esperá un minuto':r.status===503?'Hay demasiados servidores, probá más tarde':'No se pudo crear el servidor');
     const d=await r.json();$('invite-input').value=location.origin+'/?r='+d.id+'#'+d.token;$('create-box').style.display='none';
     if($('username-input').value.trim())startApp();else err('Servidor creado. Escribí tu nombre y conectá.',true);
   }catch{err('Error de red')}

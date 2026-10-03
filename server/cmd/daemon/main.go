@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,7 +33,6 @@ import (
 
 const (
 	maxChannels = 8
-	maxRooms    = 50
 	maxName     = 24
 )
 
@@ -55,10 +55,11 @@ type Signal struct {
 }
 
 var cfg struct {
-	adminKey, baseURL string
-	maxUsers          int
-	origins           []string
-	ice               []map[string]any
+	baseURL  string
+	maxUsers int
+	maxRooms int
+	origins  []string
+	ice      []map[string]any
 }
 
 var db *sql.DB
@@ -149,13 +150,14 @@ func initDB(path string) {
 	for _, q := range []string{
 		`CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, channel_id TEXT NOT NULL, sender TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(server_id, id)`,
-		`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_active INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS channels (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, name TEXT NOT NULL)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			log.Fatal(err)
 		}
 	}
+	db.Exec(`ALTER TABLE rooms ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0`) // bases viejas; si ya existe, el error se ignora
 }
 
 func dbWriter() {
@@ -181,13 +183,25 @@ func loadRoom(id string) (Room, bool) {
 	return r, err == nil
 }
 
+var (
+	errExists = errors.New("ya existe un servidor con ese nombre")
+	errFull   = errors.New("hay demasiados servidores")
+)
+
 func createRoom(name string, hours int) (string, string, error) {
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rooms`).Scan(&n); err != nil {
 		return "", "", err
 	}
-	if n >= maxRooms {
-		return "", "", errors.New("límite de servidores alcanzado")
+	if n >= cfg.maxRooms {
+		return "", "", errFull
+	}
+	var dup int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM rooms WHERE lower(name) = lower(?)`, name).Scan(&dup); err != nil {
+		return "", "", err
+	}
+	if dup > 0 {
+		return "", "", errExists
 	}
 	id, tok := randID(6), randToken()
 	var exp int64
@@ -199,13 +213,53 @@ func createRoom(name string, hours int) (string, string, error) {
 		return "", "", err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO rooms(id, name, token_hash, created_at, expires_at) VALUES(?,?,?,?,?)`, id, name, hashTok(tok), time.Now().Unix(), exp); err != nil {
+	if _, err := tx.Exec(`INSERT INTO rooms(id, name, token_hash, created_at, expires_at, last_active) VALUES(?,?,?,?,?,?)`, id, name, hashTok(tok), time.Now().Unix(), exp, time.Now().Unix()); err != nil {
 		return "", "", err
 	}
 	if _, err := tx.Exec(`INSERT INTO channels(id, room_id, name) VALUES(?,?,?)`, randID(4), id, "General"); err != nil {
 		return "", "", err
 	}
 	return id, tok, tx.Commit()
+}
+
+func touchRoom(id string) {
+	db.Exec(`UPDATE rooms SET last_active = ? WHERE id = ?`, time.Now().Unix(), id)
+}
+
+// Borra servidores sin actividad en 14 días (y sin usuarios conectados).
+func pruneRooms() {
+	for range time.Tick(time.Hour) {
+		cutoff := time.Now().Add(-14 * 24 * time.Hour).Unix()
+		rows, err := db.Query(`SELECT id FROM rooms WHERE max(last_active, created_at) < ?`, cutoff)
+		if err != nil {
+			continue
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+		for _, id := range ids {
+			hubsMu.Lock()
+			if h := hubs[id]; h != nil {
+				h.mu.Lock()
+				busy := len(h.clients) > 0
+				h.mu.Unlock()
+				if busy {
+					hubsMu.Unlock()
+					continue
+				}
+				delete(hubs, id)
+			}
+			hubsMu.Unlock()
+			for _, q := range []string{`DELETE FROM messages WHERE server_id = ?`, `DELETE FROM channels WHERE room_id = ?`, `DELETE FROM rooms WHERE id = ?`} {
+				db.Exec(q, id)
+			}
+		}
+	}
 }
 
 func loadChannels(room string) []Channel {
@@ -596,6 +650,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		fail("La sala está llena")
 		return
 	}
+	touchRoom(h.id)
 	go c.writePump()
 	c.trySend(frame(0x01, map[string]any{"id": c.id, "name": c.name, "resume": c.resume, "room": h.name, "ice": cfg.ice}))
 	h.mu.Lock()
@@ -611,24 +666,43 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	apiMu  sync.Mutex
-	apiLim = newBucket(0.2, 10)
+	ipMu   sync.Mutex
+	ipLims = map[string]*bucket{}
 )
+
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" { // detrás de cloudflared
+		return ip
+	}
+	h, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return h
+}
+
+// 3 servidores seguidos por IP y luego 1 por minuto.
+func allowCreate(ip string) bool {
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	if len(ipLims) > 10000 {
+		ipLims = map[string]*bucket{}
+	}
+	b := ipLims[ip]
+	if b == nil {
+		b = newBucket(1.0/60, 3)
+		ipLims[ip] = b
+	}
+	return b.allow()
+}
 
 func apiRooms(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	apiMu.Lock()
-	ok := apiLim.allow()
-	apiMu.Unlock()
-	if !ok {
+	if !allowCreate(clientIP(r)) {
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(cfg.adminKey)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	var in struct {
@@ -640,8 +714,16 @@ func apiRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, tok, err := createRoom(cleanName(in.Name), in.Hours)
-	if err != nil {
+	switch {
+	case errors.Is(err, errExists):
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	case errors.Is(err, errFull):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	case err != nil:
+		log.Println("createRoom:", err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -659,10 +741,9 @@ func secure(next http.Handler) http.Handler {
 }
 
 func main() {
-	cfg.adminKey = env("ADMIN_KEY", "")
-	if cfg.adminKey == "" {
-		cfg.adminKey = randToken()
-		log.Printf("ADMIN_KEY no definida; se generó una temporal: %s", cfg.adminKey)
+	cfg.maxRooms, _ = strconv.Atoi(env("MAX_ROOMS", "200"))
+	if cfg.maxRooms < 1 {
+		cfg.maxRooms = 200
 	}
 	cfg.baseURL = strings.TrimRight(env("BASE_URL", "http://localhost:8080"), "/")
 	cfg.maxUsers, _ = strconv.Atoi(env("MAX_USERS", "10"))
@@ -682,6 +763,7 @@ func main() {
 	initDB(env("DB_PATH", "./data/chat_v3.db"))
 	defer db.Close()
 	go dbWriter()
+	go pruneRooms()
 
 	var n int
 	if db.QueryRow(`SELECT COUNT(*) FROM rooms`).Scan(&n) == nil && n == 0 {
